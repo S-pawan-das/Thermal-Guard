@@ -7,7 +7,7 @@ import { TEMPLATES } from "../templates";
 import { FACTORY_DEMO_SCENARIO } from "../demo";
 import { FactoryScene, type Probe } from "../factory3d/FactoryScene";
 
-const STATUS_COLOUR: Record<ZoneStatus, string> = { normal: "#3fb68b", warning: "#e0a43a", critical: "#ff5a5f" };
+const STATUS_COLOUR: Record<ZoneStatus, string> = { normal: "#0f9d68", warning: "#d98f00", critical: "#d6264a" };
 const STATUS_TEXT: Record<ZoneStatus, string> = { normal: "OK", warning: "WARNING", critical: "CRITICAL" };
 
 type View = "3d" | "2d";
@@ -66,7 +66,7 @@ export default function HeatmapView({ state }: { state: StateMessage | null }) {
     c.height = Math.max(1, Math.round((width * dpr * PLAN_HEIGHT) / PLAN_WIDTH));
     const k = c.width / PLAN_WIDTH;
     ctx.setTransform(k, 0, 0, k, 0, 0);
-    ctx.fillStyle = "#0b1115";
+    ctx.fillStyle = "#eceff2";
     ctx.fillRect(0, 0, PLAN_WIDTH, PLAN_HEIGHT);
 
     // 1. the heat field: one pixel per cell, stretched with smoothing so it reads as a continuous field
@@ -105,12 +105,12 @@ export default function HeatmapView({ state }: { state: StateMessage | null }) {
       ctx.font = "700 14px 'Segoe UI', sans-serif";
       const w = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width, ctx.measureText(line3).width) + 12;
       const h = line3 ? 56 : 40;
-      ctx.fillStyle = "rgba(8,14,18,.72)";
+      ctx.fillStyle = "rgba(255,255,255,.9)";
       ctx.fillRect(z.x + 6, z.y + 6, Math.min(w, z.w - 12), h);
-      ctx.fillStyle = "#f2f7f9";
+      ctx.fillStyle = "#1d2025";
       ctx.fillText(line1, z.x + 12, z.y + 23);
       ctx.font = "600 12px 'Segoe UI', sans-serif";
-      ctx.fillStyle = "#d3e0e5";
+      ctx.fillStyle = "#5b6470";
       ctx.fillText(line2, z.x + 12, z.y + 39);
       if (line3) { ctx.fillStyle = STATUS_COLOUR[status]; ctx.fillText(line3, z.x + 12, z.y + 54); }
       ctx.restore();
@@ -127,14 +127,14 @@ export default function HeatmapView({ state }: { state: StateMessage | null }) {
       const z = zones.find((q) => q.id === id);
       if (!z) continue;
       ctx.font = "700 12px 'Segoe UI', sans-serif";
-      ctx.fillStyle = "#ffffff";
+      ctx.fillStyle = "#1d6fb8";
       ctx.fillText("❄ COOLER FAILED", z.x + 12, z.y + z.h - 12);
     }
     for (const ex of plan?.exits ?? []) {
       ctx.save();
       ctx.translate(ex.x, ex.y);
       ctx.rotate(Math.PI / 4);
-      ctx.fillStyle = "#4cc3ff";
+      ctx.fillStyle = "#1d6fb8";
       ctx.fillRect(-7, -7, 14, 14);
       ctx.restore();
     }

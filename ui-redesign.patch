@@ -1,0 +1,1284 @@
+diff -ruN a/client/index.html b/client/index.html
+--- a/client/index.html	2026-10-21 23:52:58.367039527 +0530
++++ b/client/index.html	2026-10-21 16:17:25.000000000 +0530
+@@ -2,8 +2,12 @@
+ <html lang="en">
+   <head>
+     <meta charset="UTF-8" />
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
++    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
++    <meta name="theme-color" content="#eceef0" />
+     <title>Thermal Guard</title>
++    <link rel="preconnect" href="https://fonts.googleapis.com" />
++    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
++    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+   </head>
+   <body>
+     <div id="root"></div>
+diff -ruN a/client/src/App.tsx b/client/src/App.tsx
+--- a/client/src/App.tsx	2026-10-21 23:52:58.370152541 +0530
++++ b/client/src/App.tsx	2026-10-21 23:48:09.000000000 +0530
+@@ -1,31 +1,71 @@
+ import { useEffect, useRef, useState } from "react";
+ import { io } from "socket.io-client";
+-import type { AlertRecord, AlertsMessage, StateMessage } from "../../shared/types";
++import type { AlertRecord, AlertsMessage, StateMessage, Zone, ZoneType } from "../../shared/types";
+ import ZoneCard from "./components/ZoneCard";
+ import FloorPlanEditor from "./components/FloorPlanEditor";
+ import AlertBanner from "./components/AlertBanner";
+ import AlertFeed from "./components/AlertFeed";
+ import SimControls from "./components/SimControls";
+ import HeatmapView from "./components/HeatmapView";
++import Onboarding from "./components/Onboarding";
++import Icon, { type IconName } from "./components/icons";
+ 
+ type Connection = "connecting" | "connected" | "disconnected";
+ type View = "dashboard" | "heat" | "plan" | "sim";
+-const CONN_LABEL: Record<Connection, string> = {
+-  connecting: "Connecting",
+-  connected: "Connected",
+-  disconnected: "Disconnected",
++type Filter = "all" | "attention" | ZoneType;
++
++const CONN_LABEL: Record<Connection, string> = { connecting: "Connecting", connected: "Live", disconnected: "Offline" };
++const TITLES: Record<View, [string, string]> = {
++  dashboard: ["Your Factory", "Overview"],
++  heat: ["Live Factory", "Heatmap"],
++  plan: ["Plan Your", "Floor"],
++  sim: ["Incident", "Simulator"],
++};
++const NAV: { view: View; label: string; icon: IconName }[] = [
++  { view: "dashboard", label: "Dashboard", icon: "home" },
++  { view: "heat", label: "Heatmap", icon: "cube" },
++  { view: "plan", label: "Floor plan", icon: "layout" },
++  { view: "sim", label: "Simulator", icon: "sliders" },
++];
++const FILTERS: { key: Filter; label: string }[] = [
++  { key: "all", label: "All" },
++  { key: "attention", label: "Needs attention" },
++  { key: "cold-storage", label: "Cold storage" },
++  { key: "general", label: "General" },
++  { key: "hot-process", label: "Hot process" },
++];
++
++const INTRO_KEY = "thermalGuardIntroSeen";
++const introSeen = () => {
++  try {
++    return localStorage.getItem(INTRO_KEY) === "1" || new URLSearchParams(location.search).get("intro") === "0";
++  } catch {
++    return false;
++  }
++};
++const greeting = () => {
++  const h = new Date().getHours();
++  return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+ };
++const needsAttention = (z: Zone) => z.status !== "normal" || !!z.ai?.alert;
+ 
+ export default function App() {
+   const [state, setState] = useState<StateMessage | null>(null);
+   const [conn, setConn] = useState<Connection>("connecting");
+   const [error, setError] = useState<string | null>(null);
+   const [view, setView] = useState<View>("dashboard");
++  const [filter, setFilter] = useState<Filter>("all");
+   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
+   const [soundOn, setSoundOn] = useState(false);
++  const [intro, setIntro] = useState(() => !introSeen());
+   const audio = useRef<AudioContext | null>(null);
+   const seenCritical = useRef<Set<string> | null>(null);
+ 
++  const finishIntro = () => {
++    try { localStorage.setItem(INTRO_KEY, "1"); } catch { /* private mode: the intro will just show again */ }
++    setIntro(false);
++  };
++
+   // Sound is OFF until the user clicks (browsers block autoplay). The app works fully without it.
+   const beep = () => {
+     const ctx = audio.current;
+@@ -49,10 +89,7 @@
+ 
+   useEffect(() => {
+     const socket = io(); // same origin; Vite proxies /socket.io to the backend
+-    socket.on("connect", () => {
+-      setConn("connected");
+-      setError(null);
+-    });
++    socket.on("connect", () => { setConn("connected"); setError(null); });
+     socket.on("disconnect", () => setConn("disconnected"));
+     socket.on("connect_error", () => {
+       setConn("disconnected");
+@@ -61,9 +98,7 @@
+     socket.io.on("reconnect_attempt", () => setConn("connecting"));
+     socket.on("state", (msg: StateMessage) => setState(msg));
+     socket.on("alerts", (msg: AlertsMessage) => setAlerts(msg.alerts));
+-    return () => {
+-      socket.close();
+-    };
++    return () => { socket.close(); };
+   }, []);
+ 
+   // beep once for each NEW critical alert (never for ones that were already active when the page loaded)
+@@ -73,27 +108,38 @@
+     seenCritical.current = ids;
+   }, [alerts]);
+ 
++  const zones = state?.zones ?? [];
++  const activeAlerts = alerts.filter((a) => a.status === "active").length;
++  const nCritical = zones.filter((z) => z.status === "critical").length;
++  const nAttention = zones.filter(needsAttention).length;
++  const nAi = zones.filter((z) => z.ai?.alert).length;
++  const shown = zones.filter((z) => (filter === "all" ? true : filter === "attention" ? needsAttention(z) : z.type === filter));
++
++  const goAlerts = () => {
++    setView("dashboard");
++    setTimeout(() => document.getElementById("alerts")?.scrollIntoView({ behavior: "smooth" }), 60);
++  };
++  const [t1, t2] = TITLES[view];
++
+   return (
+-    <div className="page">
+-      <header className="top">
+-        <div>
+-          <h1>Thermal Guard</h1>
+-          <span className="sim">SIMULATED DATA</span>
+-        </div>
+-        <div className="meta">
+-          <span className={`conn ${conn}`}>{CONN_LABEL[conn]}</span>
+-          <small>
+-            Last updated: {state ? new Date(state.timestamp).toLocaleTimeString() : "no data yet"}
+-          </small>
++    <div className="app">
++      {intro && <Onboarding onDone={finishIntro} />}
++
++      <header className="appbar">
++        <div className="avatar" aria-hidden="true">TG</div>
++        <div className="hello">
++          <b>Hi, Operator</b>
++          <span>{greeting()} · <span className="pill-sim">SIMULATED DATA</span></span>
+         </div>
++        <div className="grow" />
++        <span className={`conn ${conn}`} role="status"><b>{CONN_LABEL[conn]}</b><span>{state ? new Date(state.timestamp).toLocaleTimeString() : "no data yet"}</span></span>
++        <button className="round-btn" onClick={goAlerts} aria-label={`Alerts: ${activeAlerts} active`}>
++          <Icon name="bell" />
++          {activeAlerts > 0 && <span className="count">{activeAlerts}</span>}
++        </button>
+       </header>
+ 
+-      <nav className="tabs">
+-        <button className={view === "dashboard" ? "on" : ""} onClick={() => setView("dashboard")}>Dashboard</button>
+-        <button className={view === "heat" ? "on" : ""} onClick={() => setView("heat")}>Heatmap</button>
+-        <button className={view === "plan" ? "on" : ""} onClick={() => setView("plan")}>Floor plan</button>
+-        <button className={view === "sim" ? "on" : ""} onClick={() => setView("sim")}>Simulator</button>
+-      </nav>
++      <h1 className="title">{t1}<br /><em>{t2}</em></h1>
+ 
+       <AlertBanner alerts={alerts} />
+ 
+@@ -102,24 +148,68 @@
+       ) : view === "plan" ? (
+         <FloorPlanEditor />
+       ) : view === "sim" ? (
+-        <SimControls zones={state?.zones ?? []} sim={state?.sim} />
++        <SimControls zones={zones} sim={state?.sim} />
+       ) : (
+         <>
+           {error && <p className="alert" role="alert">{error}</p>}
+-          {state && state.zones.length === 0 ? (
++          {state && (
++            <section className="hero" aria-label="Plant status">
++              <div className="hero-in">
++                <div>
++                  <div className="hero-tags">
++                    <span className="tag">{zones.length} zones</span>
++                    {state.sim && <span className={`tag ${state.sim.paused ? "warm" : "good"}`}>{state.sim.paused ? "Paused" : "Running"} · step {state.sim.step}</span>}
++                    {nAi > 0 && <span className="tag warm">✦ {nAi} AI warning{nAi > 1 ? "s" : ""}</span>}
++                  </div>
++                  <h2>{nCritical > 0 ? `${nCritical} zone${nCritical > 1 ? "s" : ""} out of range` : nAttention > 0 ? `${nAttention} zone${nAttention > 1 ? "s" : ""} need attention` : zones.length ? "All zones stable" : "No zones yet"}</h2>
++                  <p>{zones.length ? "Open the heatmap to see where the heat is." : "Open the Floor plan tab, draw a zone and set its temperature limits."}</p>
++                </div>
++                <div className="kpis">
++                  <div className="kpi good"><b>{zones.length - nAttention}</b><span>Stable</span></div>
++                  <div className={`kpi ${nAttention ? "warn" : ""}`}><b>{nAttention}</b><span>Attention</span></div>
++                  <div className={`kpi ${activeAlerts ? "bad" : ""}`}><b>{activeAlerts}</b><span>Alerts</span></div>
++                </div>
++              </div>
++            </section>
++          )}
++
++          {zones.length > 0 && (
++            <div className="chips" role="tablist" aria-label="Filter zones">
++              {FILTERS.map((f) => (
++                <button key={f.key} role="tab" aria-selected={filter === f.key} className={`chip ${filter === f.key ? "on" : ""}`} onClick={() => setFilter(f.key)}>
++                  {f.label}{f.key === "attention" && nAttention ? ` (${nAttention})` : ""}
++                </button>
++              ))}
++            </div>
++          )}
++
++          {state && zones.length === 0 ? (
+             <p className="empty">No zones yet. Open the Floor plan tab, draw a zone and set its temperature limits.</p>
+           ) : state ? (
+-            <main className={`grid ${conn !== "connected" ? "stale" : ""}`}>
+-              {state.zones.map((z) => (
+-                <ZoneCard key={z.id} zone={z} />
+-              ))}
+-            </main>
++            shown.length === 0 ? (
++              <p className="empty">No zones match this filter right now.</p>
++            ) : (
++              <main className={`grid ${conn !== "connected" ? "stale" : ""}`}>
++                {shown.map((z) => <ZoneCard key={z.id} zone={z} />)}
++              </main>
++            )
+           ) : (
+             <p className="empty">Waiting for the first reading from the server…</p>
+           )}
+           <AlertFeed alerts={alerts} soundOn={soundOn} onToggleSound={toggleSound} />
+         </>
+       )}
++
++      <p className="foot-link">Thermal Guard · all data is simulated · <button onClick={() => setIntro(true)}>Show intro</button></p>
++
++      <nav className="dock" aria-label="Main">
++        {NAV.map((n) => (
++          <button key={n.view} className={view === n.view ? "on" : ""} aria-label={n.label} aria-current={view === n.view ? "page" : undefined} title={n.label} onClick={() => setView(n.view)}>
++            <Icon name={n.icon} />
++            <span>{n.label}</span>
++          </button>
++        ))}
++      </nav>
+     </div>
+   );
+ }
+diff -ruN a/client/src/components/AlertBanner.tsx b/client/src/components/AlertBanner.tsx
+--- a/client/src/components/AlertBanner.tsx	2026-10-21 23:52:58.367396601 +0530
++++ b/client/src/components/AlertBanner.tsx	2026-10-21 23:48:13.000000000 +0530
+@@ -1,4 +1,5 @@
+ import type { AlertRecord } from "../../../shared/types";
++import Icon from "./icons";
+ 
+ // Shown on every tab while at least one CRITICAL alert is active. Text + symbol, not colour alone.
+ export default function AlertBanner({ alerts }: { alerts: AlertRecord[] }) {
+@@ -6,14 +7,17 @@
+   if (critical.length === 0) return null;
+   return (
+     <div className="banner" role="alert">
+-      <strong>⛔ CRITICAL{critical.length > 1 ? ` (${critical.length} active alerts)` : " ALERT"}</strong>
+-      <ul>
+-        {critical.map((a) => (
+-          <li key={a.id}>
+-            <b>{a.zoneName}</b>: {a.reason}
+-          </li>
+-        ))}
+-      </ul>
++      <span className="ico"><Icon name="stop" size={22} /></span>
++      <div>
++        <strong>⛔ CRITICAL{critical.length > 1 ? ` (${critical.length} active alerts)` : " ALERT"}</strong>
++        <ul>
++          {critical.map((a) => (
++            <li key={a.id}>
++              <b>{a.zoneName}</b>: {a.reason}
++            </li>
++          ))}
++        </ul>
++      </div>
+     </div>
+   );
+ }
+diff -ruN a/client/src/components/AlertFeed.tsx b/client/src/components/AlertFeed.tsx
+--- a/client/src/components/AlertFeed.tsx	2026-10-21 23:52:58.367410895 +0530
++++ b/client/src/components/AlertFeed.tsx	2026-10-21 23:48:18.000000000 +0530
+@@ -1,5 +1,6 @@
+ import { useState } from "react";
+ import type { AlertRecord } from "../../../shared/types";
++import Icon from "./icons";
+ 
+ const time = (iso: string) => new Date(iso).toLocaleTimeString();
+ 
+@@ -18,11 +19,13 @@
+   }
+ 
+   return (
+-    <section className="feed" aria-label="Alert feed">
++    <section className="feed" id="alerts" aria-label="Alert feed">
+       <div className="feed-head">
+-        <h2>Alerts ({alerts.filter((a) => a.status === "active").length} active)</h2>
+-        <button className="btn" onClick={onToggleSound}>{soundOn ? "Sound on (click to mute)" : "Enable alert sound"}</button>
+-        <button className="btn" onClick={clearHistory}>Clear resolved history</button>
++        <h2>Alerts <span style={{ color: "var(--muted)", fontWeight: 600 }}>({alerts.filter((a) => a.status === "active").length} active)</span></h2>
++        <button className="switch" role="switch" aria-checked={soundOn} onClick={onToggleSound}>
++          <Icon name={soundOn ? "volume" : "mute"} size={18} /> Alert sound <i />
++        </button>
++        <button className="btn" onClick={clearHistory}><Icon name="trash" size={16} /> Clear resolved</button>
+       </div>
+       {note && <p className="hint" role="status">{note}</p>}
+       {alerts.length === 0 ? (
+@@ -31,9 +34,12 @@
+         <ul className="alert-list">
+           {alerts.map((a) => (
+             <li key={a.id} className={`alert-item ${a.severity} ${a.status}`}>
+-              <span className="sev">{a.severity === "critical" ? "⛔ CRITICAL" : "⚠ WARNING"}</span>
+-              <span className="kind">{a.kind === "high" ? "High temperature" : "Low temperature"}</span>
+-              <b>{a.zoneName}</b>
++              <span className="dot"><Icon name={a.severity === "critical" ? "stop" : "alert"} size={20} /></span>
++              <div className="top">
++                <span className="sev">{a.severity === "critical" ? "⛔ CRITICAL" : "⚠ WARNING"}</span>
++                <b>{a.zoneName}</b>
++                <span className="kind">{a.kind === "high" ? "High temperature" : "Low temperature"}</span>
++              </div>
+               <span className="why">{a.reason}</span>
+               <small>
+                 {a.status === "active" ? "ACTIVE since " + time(a.startedAt) : `Resolved ${a.resolvedAt ? time(a.resolvedAt) : ""} (${a.resolution})`}
+diff -ruN a/client/src/components/FloorPlanEditor.tsx b/client/src/components/FloorPlanEditor.tsx
+--- a/client/src/components/FloorPlanEditor.tsx	2026-10-21 23:52:58.367423774 +0530
++++ b/client/src/components/FloorPlanEditor.tsx	2026-10-21 23:49:46.000000000 +0530
+@@ -222,7 +222,7 @@
+     c.height = Math.max(1, Math.round((width * dpr * PLAN_HEIGHT) / PLAN_WIDTH));
+     const k = c.width / PLAN_WIDTH;
+     ctx.setTransform(k, 0, 0, k, 0, 0);
+-    ctx.fillStyle = "#0b1115";
++    ctx.fillStyle = "#eceff2";
+     ctx.fillRect(0, 0, PLAN_WIDTH, PLAN_HEIGHT);
+ 
+     if (img) {
+@@ -236,14 +236,14 @@
+ 
+     ctx.lineWidth = 1 / k;
+     for (let x = 0; x <= PLAN_WIDTH; x += GRID_SIZE) {
+-      ctx.strokeStyle = x % 50 === 0 ? "rgba(140,170,185,.30)" : "rgba(140,170,185,.09)";
++      ctx.strokeStyle = x % 50 === 0 ? "rgba(60,70,90,.20)" : "rgba(60,70,90,.07)";
+       ctx.beginPath();
+       ctx.moveTo(x, 0);
+       ctx.lineTo(x, PLAN_HEIGHT);
+       ctx.stroke();
+     }
+     for (let y = 0; y <= PLAN_HEIGHT; y += GRID_SIZE) {
+-      ctx.strokeStyle = y % 50 === 0 ? "rgba(140,170,185,.30)" : "rgba(140,170,185,.09)";
++      ctx.strokeStyle = y % 50 === 0 ? "rgba(60,70,90,.20)" : "rgba(60,70,90,.07)";
+       ctx.beginPath();
+       ctx.moveTo(0, y);
+       ctx.lineTo(PLAN_WIDTH, y);
+@@ -252,8 +252,8 @@
+ 
+     for (const z of plan?.zones ?? []) {
+       const on = sel?.kind === "zone" && sel.id === z.id;
+-      ctx.fillStyle = on ? "rgba(63,182,139,.30)" : "rgba(63,182,139,.14)";
+-      ctx.strokeStyle = on ? "#e8f1f5" : "#3fb68b";
++      ctx.fillStyle = on ? "rgba(15,157,104,.28)" : "rgba(15,157,104,.13)";
++      ctx.strokeStyle = on ? "#1d2025" : "#0f9d68";
+       ctx.lineWidth = on ? 3 : 2;
+       ctx.fillRect(z.x, z.y, z.w, z.h);
+       ctx.strokeRect(z.x, z.y, z.w, z.h);
+@@ -261,7 +261,7 @@
+       ctx.beginPath();
+       ctx.rect(z.x, z.y, z.w, z.h);
+       ctx.clip();
+-      ctx.fillStyle = "#dce6ea";
++      ctx.fillStyle = "#1d2025";
+       ctx.font = "600 15px 'Segoe UI', sans-serif";
+       ctx.fillText(z.name, z.x + 8, z.y + 22);
+       ctx.restore();
+@@ -272,15 +272,15 @@
+       ctx.save();
+       ctx.translate(ex.x, ex.y);
+       ctx.rotate(Math.PI / 4);
+-      ctx.fillStyle = "#4cc3ff";
++      ctx.fillStyle = "#1d6fb8";
+       ctx.fillRect(-8, -8, 16, 16);
+       if (on) {
+-        ctx.strokeStyle = "#ffffff";
++        ctx.strokeStyle = "#1d2025";
+         ctx.lineWidth = 3;
+         ctx.strokeRect(-8, -8, 16, 16);
+       }
+       ctx.restore();
+-      ctx.fillStyle = "#4cc3ff";
++      ctx.fillStyle = "#1d6fb8";
+       ctx.font = "600 12px 'Segoe UI', sans-serif";
+       ctx.fillText("EXIT", ex.x + 14, ex.y + 4);
+     }
+@@ -288,7 +288,7 @@
+     if (drag?.mode === "draw") {
+       const r = clampRect(drag.x0, drag.y0, drag.x1, drag.y1);
+       ctx.setLineDash([6, 4]);
+-      ctx.strokeStyle = "#e0a43a";
++      ctx.strokeStyle = "#e8590c";
+       ctx.lineWidth = 2;
+       ctx.strokeRect(r.x, r.y, r.w, r.h);
+       ctx.setLineDash([]);
+diff -ruN a/client/src/components/HeatmapView.tsx b/client/src/components/HeatmapView.tsx
+--- a/client/src/components/HeatmapView.tsx	2026-10-21 23:52:58.370341525 +0530
++++ b/client/src/components/HeatmapView.tsx	2026-10-21 23:49:46.000000000 +0530
+@@ -7,7 +7,7 @@
+ import { FACTORY_DEMO_SCENARIO } from "../demo";
+ import { FactoryScene, type Probe } from "../factory3d/FactoryScene";
+ 
+-const STATUS_COLOUR: Record<ZoneStatus, string> = { normal: "#3fb68b", warning: "#e0a43a", critical: "#ff5a5f" };
++const STATUS_COLOUR: Record<ZoneStatus, string> = { normal: "#0f9d68", warning: "#d98f00", critical: "#d6264a" };
+ const STATUS_TEXT: Record<ZoneStatus, string> = { normal: "OK", warning: "WARNING", critical: "CRITICAL" };
+ 
+ type View = "3d" | "2d";
+@@ -66,7 +66,7 @@
+     c.height = Math.max(1, Math.round((width * dpr * PLAN_HEIGHT) / PLAN_WIDTH));
+     const k = c.width / PLAN_WIDTH;
+     ctx.setTransform(k, 0, 0, k, 0, 0);
+-    ctx.fillStyle = "#0b1115";
++    ctx.fillStyle = "#eceff2";
+     ctx.fillRect(0, 0, PLAN_WIDTH, PLAN_HEIGHT);
+ 
+     // 1. the heat field: one pixel per cell, stretched with smoothing so it reads as a continuous field
+@@ -105,12 +105,12 @@
+       ctx.font = "700 14px 'Segoe UI', sans-serif";
+       const w = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width, ctx.measureText(line3).width) + 12;
+       const h = line3 ? 56 : 40;
+-      ctx.fillStyle = "rgba(8,14,18,.72)";
++      ctx.fillStyle = "rgba(255,255,255,.9)";
+       ctx.fillRect(z.x + 6, z.y + 6, Math.min(w, z.w - 12), h);
+-      ctx.fillStyle = "#f2f7f9";
++      ctx.fillStyle = "#1d2025";
+       ctx.fillText(line1, z.x + 12, z.y + 23);
+       ctx.font = "600 12px 'Segoe UI', sans-serif";
+-      ctx.fillStyle = "#d3e0e5";
++      ctx.fillStyle = "#5b6470";
+       ctx.fillText(line2, z.x + 12, z.y + 39);
+       if (line3) { ctx.fillStyle = STATUS_COLOUR[status]; ctx.fillText(line3, z.x + 12, z.y + 54); }
+       ctx.restore();
+@@ -127,14 +127,14 @@
+       const z = zones.find((q) => q.id === id);
+       if (!z) continue;
+       ctx.font = "700 12px 'Segoe UI', sans-serif";
+-      ctx.fillStyle = "#ffffff";
++      ctx.fillStyle = "#1d6fb8";
+       ctx.fillText("❄ COOLER FAILED", z.x + 12, z.y + z.h - 12);
+     }
+     for (const ex of plan?.exits ?? []) {
+       ctx.save();
+       ctx.translate(ex.x, ex.y);
+       ctx.rotate(Math.PI / 4);
+-      ctx.fillStyle = "#4cc3ff";
++      ctx.fillStyle = "#1d6fb8";
+       ctx.fillRect(-7, -7, 14, 14);
+       ctx.restore();
+     }
+diff -ruN a/client/src/components/Onboarding.tsx b/client/src/components/Onboarding.tsx
+--- a/client/src/components/Onboarding.tsx	1970-01-01 05:30:00.000000000 +0530
++++ b/client/src/components/Onboarding.tsx	2026-10-21 23:47:46.000000000 +0530
+@@ -0,0 +1,87 @@
++import { useState } from "react";
++import Icon from "./icons";
++
++// First-visit intro, three swipe-able slides in the style of a mobile onboarding. Skippable; remembered in localStorage.
++function ArtHeat() {
++  return (
++    <svg viewBox="0 0 400 300" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
++      <defs>
++        <radialGradient id="h1"><stop offset="0" stopColor="#e5381a" /><stop offset=".45" stopColor="#f6a623" stopOpacity=".85" /><stop offset="1" stopColor="#f6a623" stopOpacity="0" /></radialGradient>
++        <radialGradient id="h2"><stop offset="0" stopColor="#f6a623" /><stop offset="1" stopColor="#3ab98a" stopOpacity="0" /></radialGradient>
++        <radialGradient id="h3"><stop offset="0" stopColor="#2f7be8" /><stop offset="1" stopColor="#2f7be8" stopOpacity="0" /></radialGradient>
++      </defs>
++      <rect width="400" height="300" fill="#e6f5ee" />
++      <circle cx="120" cy="190" r="120" fill="url(#h3)" />
++      <circle cx="290" cy="120" r="130" fill="url(#h1)" />
++      <circle cx="230" cy="220" r="80" fill="url(#h2)" />
++      <g fill="none" stroke="#fff" strokeWidth="5" strokeLinejoin="round">
++        <rect x="34" y="60" width="130" height="90" rx="10" /><rect x="180" y="60" width="190" height="100" rx="10" />
++        <rect x="34" y="166" width="100" height="94" rx="10" /><rect x="150" y="178" width="220" height="82" rx="10" />
++      </g>
++      <g fill="#fff"><rect x="214" y="96" width="30" height="22" rx="6" /><rect x="262" y="96" width="30" height="22" rx="6" /><rect x="310" y="96" width="30" height="22" rx="6" /></g>
++    </svg>
++  );
++}
++function ArtCube() {
++  return (
++    <svg viewBox="0 0 400 300" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
++      <defs><linearGradient id="f1" x1="0" x2="1"><stop offset="0" stopColor="#3ab98a" /><stop offset=".5" stopColor="#f6c445" /><stop offset="1" stopColor="#e5381a" /></linearGradient></defs>
++      <rect width="400" height="300" fill="#eef0f6" />
++      <polygon points="50,175 200,95 350,175 200,255" fill="url(#f1)" />
++      <g fill="none" stroke="#fff" strokeWidth="4" strokeLinejoin="round" opacity=".95">
++        <polygon points="120,172 200,130 250,157 170,199" /><polygon points="228,176 280,148 318,168 266,196" />
++      </g>
++      <g strokeLinejoin="round">
++        <polygon points="190,150 214,138 238,150 214,162" fill="#fff" /><polygon points="190,150 214,162 214,186 190,174" fill="#d7dade" /><polygon points="214,162 238,150 238,174 214,186" fill="#bfc3c9" />
++        <polygon points="262,174 282,164 302,174 282,184" fill="#fff" /><polygon points="262,174 282,184 282,204 262,194" fill="#d7dade" /><polygon points="282,184 302,174 302,194 282,204" fill="#bfc3c9" />
++        <polygon points="130,178 150,168 170,178 150,188" fill="#fff" /><polygon points="130,178 150,188 150,208 130,198" fill="#d7dade" /><polygon points="150,188 170,178 170,198 150,208" fill="#bfc3c9" />
++      </g>
++    </svg>
++  );
++}
++function ArtAi() {
++  return (
++    <svg viewBox="0 0 400 300" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
++      <rect width="400" height="300" fill="#fff2ec" />
++      <line x1="30" y1="96" x2="372" y2="96" stroke="#d6264a" strokeWidth="3" strokeDasharray="8 7" />
++      <text x="34" y="86" fontSize="13" fontWeight="700" fill="#d6264a">limit</text>
++      <path d="M30 230 C120 228 170 224 215 190 S300 110 372 60" fill="none" stroke="#111214" strokeWidth="6" strokeLinecap="round" />
++      <line x1="200" y1="60" x2="200" y2="250" stroke="#d93b0a" strokeWidth="3" />
++      <rect x="150" y="40" width="100" height="30" rx="15" fill="#d93b0a" /><text x="200" y="60" textAnchor="middle" fontSize="14" fontWeight="800" fill="#fff">AI warns</text>
++      <line x1="330" y1="96" x2="330" y2="250" stroke="#8a8d93" strokeWidth="3" />
++      <rect x="262" y="214" width="136" height="30" rx="15" fill="#8a8d93" /><text x="330" y="234" textAnchor="middle" fontSize="13" fontWeight="800" fill="#fff">plain alarm</text>
++      <circle cx="330" cy="96" r="9" fill="#fff" stroke="#d6264a" strokeWidth="5" />
++    </svg>
++  );
++}
++
++const SLIDES = [
++  { art: <ArtHeat />, a: "Smarter factories", b: "start here", text: "Every zone's temperature, live, on one floor plan, with limits you set." },
++  { art: <ArtCube />, a: "Heat you can", b: "walk around", text: "A live 3D model of your plant. Red means trouble, green means in range." },
++  { art: <ArtAi />, a: "Warned before", b: "it goes wrong", text: "A trained AI model flags zones heading out of range, ahead of a plain alarm. All data here is simulated." },
++];
++
++export default function Onboarding({ onDone }: { onDone: () => void }) {
++  const [i, setI] = useState(0);
++  const s = SLIDES[i];
++  const last = i === SLIDES.length - 1;
++  return (
++    <div className="intro" role="dialog" aria-modal="true" aria-label="Welcome to Thermal Guard">
++      <div className="intro-art">
++        <button className="skip" onClick={onDone}>Skip</button>
++        {s.art}
++      </div>
++      <div className="intro-body">
++        <h1>{s.a}<span>{s.b}</span></h1>
++        <p>{s.text}</p>
++        <div className="intro-foot">
++          <div className="dots" aria-hidden="true">{SLIDES.map((_, k) => <i key={k} className={k === i ? "on" : ""} />)}</div>
++          <div className="pager">
++            <button aria-label="Previous" disabled={i === 0} onClick={() => setI(i - 1)}><Icon name="arrow" size={22} className="flip" /></button>
++            <button className="go" aria-label={last ? "Get started" : "Next"} onClick={() => (last ? onDone() : setI(i + 1))}><Icon name={last ? "check" : "arrow"} size={22} /></button>
++          </div>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff -ruN a/client/src/components/SimControls.tsx b/client/src/components/SimControls.tsx
+--- a/client/src/components/SimControls.tsx	2026-10-21 23:52:58.367444033 +0530
++++ b/client/src/components/SimControls.tsx	2026-10-21 23:51:13.000000000 +0530
+@@ -1,5 +1,6 @@
+ import { useState } from "react";
+ import type { SimStatus, Zone } from "../../../shared/types";
++import Icon from "./icons";
+ 
+ type Note = { kind: "ok" | "error"; text: string } | null;
+ const parseTemp = (t: string) => (/^-?\d+(\.\d+)?$/.test(t.trim()) ? Number(t.trim()) : NaN);
+@@ -42,21 +43,28 @@
+   }
+ 
+   if (zones.length === 0) return <p className="empty">Create at least one zone in the Floor plan tab to use the simulator controls.</p>;
++  // Fires with a zone are user incidents; fires without one are the scenario's machine heat sources.
++  const zoneFires = sim?.fires.filter((f) => f.zoneId) ?? [];
++  const machines = (sim?.fires.length ?? 0) - zoneFires.length;
++  const issues = [
++    ...zoneFires.map((f) => `Fire in ${nameOf(f.zoneId)}`),
++    ...(machines > 0 ? [`${machines} machine heat source${machines > 1 ? "s" : ""} running`] : []),
++    ...(sim?.failedCoolers.map((id) => `Cooler failed in ${nameOf(id)}`) ?? []),
++  ];
+   return (
+     <section className="simbox">
+       <div className="simstatus" role="status">
+-        <p>
+-          <b>Scenario:</b> {sim?.scenario ?? "—"} · <b>{sim?.paused ? "⏸ PAUSED" : "▶ Running"}</b> · step {sim?.step ?? 0}
+-        </p>
+-        <p>
+-          {sim?.baseline ? "Baseline: no fire and no failed cooler." : ""}
+-          {sim?.fires.map((f) => `Fire in ${nameOf(f.zoneId)}. `)}
+-          {sim?.failedCoolers.map((id) => `Cooler failed in ${nameOf(id)}. `)}
+-        </p>
++        <div className="row">
++          <span className="tag">{sim?.scenario ?? "—"}</span>
++          <span className={`tag ${sim?.paused ? "warm" : "good"}`}>{sim?.paused ? "⏸ Paused" : "▶ Running"}</span>
++          <span className="tag">step {sim?.step ?? 0}</span>
++          {sim?.baseline && <span className="tag good">Baseline: no fire, no failed cooler</span>}
++          {issues.map((t, i) => <span key={i} className={`tag ${t.includes("machine") ? "warm" : "bad"}`}>{t}</span>)}
++        </div>
+       </div>
+ 
+-      <label>
+-        Zone
++      <label className="pick">
++        Zone to affect
+         <select value={zone.id} onChange={(e) => setZoneId(e.target.value)}>
+           {zones.map((z) => (
+             <option key={z.id} value={z.id}>{z.name}</option>
+@@ -64,25 +72,43 @@
+         </select>
+       </label>
+ 
+-      <div className="simrow">
+-        <button className="btn danger" disabled={busy} onClick={() => call("/api/sim/fire", { zoneId: zone.id })}>Start fire in zone</button>
+-        <span className="hint">Heats the middle of the zone toward 300 °C.</span>
++      <div className="act">
++        <span className="ai-ico hot"><Icon name="flame" /></span>
++        <h3>Start a fire</h3>
++        <p>Heats the middle of the zone toward 300 °C.</p>
++        <div className="ctl"><button className="btn danger" disabled={busy} onClick={() => call("/api/sim/fire", { zoneId: zone.id })}>Start fire</button></div>
+       </div>
+-      <div className="simrow">
+-        <input aria-label="Failure temperature (optional)" placeholder="failure °C (optional)" inputMode="decimal" value={failTemp} onChange={(e) => setFailTemp(e.target.value)} />
+-        <button className="btn danger" disabled={busy || zone.type !== "cold-storage"} onClick={failCooler}>Fail cooler</button>
+-        <span className="hint">{zone.type === "cold-storage" ? "Room drifts toward ambient (or the failure °C)." : "Only cold-storage zones have a cooler."}</span>
++
++      <div className="act">
++        <span className="ai-ico cold"><Icon name="snowflake" /></span>
++        <h3>Fail the cooler</h3>
++        <p>{zone.type === "cold-storage" ? "The room drifts toward ambient (or the failure °C)." : "Only cold-storage zones have a cooler."}</p>
++        <div className="ctl">
++          <input aria-label="Failure temperature (optional)" placeholder="failure °C" inputMode="decimal" value={failTemp} onChange={(e) => setFailTemp(e.target.value)} />
++          <button className="btn danger" disabled={busy || zone.type !== "cold-storage"} onClick={failCooler}>Fail cooler</button>
++        </div>
+       </div>
+-      <div className="simrow">
+-        <input aria-label="Temperature in °C" placeholder="°C" inputMode="decimal" value={temp} onChange={(e) => setTemp(e.target.value)} />
+-        <button className="btn" disabled={busy} onClick={setTemperature}>Set zone temperature</button>
+-        <span className="hint">One-time demo override of every cell the zone covers.</span>
++
++      <div className="act">
++        <span className="ai-ico"><Icon name="thermo" /></span>
++        <h3>Set zone temperature</h3>
++        <p>One-time override of every cell the zone covers; the simulation continues from there.</p>
++        <div className="ctl">
++          <input aria-label="Temperature in °C" placeholder="°C" inputMode="decimal" value={temp} onChange={(e) => setTemp(e.target.value)} />
++          <button className="btn" disabled={busy} onClick={setTemperature}>Set</button>
++        </div>
+       </div>
+-      <div className="simrow">
+-        <button className="btn" disabled={busy} onClick={() => call(sim?.paused ? "/api/sim/resume" : "/api/sim/pause")}>{sim?.paused ? "Resume" : "Pause"}</button>
+-        <button className="btn" disabled={busy} onClick={() => call("/api/sim/reset")}>Reset scenario</button>
+-        <span className="hint">Reset removes fires and failures and restores the baseline. Alert history is kept.</span>
++
++      <div className="act">
++        <span className="ai-ico"><Icon name={sim?.paused ? "play" : "pause"} /></span>
++        <h3>Simulation</h3>
++        <p>Reset removes fires and failures and restores the baseline. Alert history is kept.</p>
++        <div className="ctl">
++          <button className="btn" disabled={busy} onClick={() => call(sim?.paused ? "/api/sim/resume" : "/api/sim/pause")}>{sim?.paused ? "Resume" : "Pause"}</button>
++          <button className="btn" disabled={busy} onClick={() => call("/api/sim/reset")}><Icon name="reset" size={16} /> Reset</button>
++        </div>
+       </div>
++
+       {note && <p className={note.kind === "ok" ? "field-ok" : "field-error"} role={note.kind === "ok" ? "status" : "alert"}>{note.kind === "ok" ? "✔ " : "✖ "}{note.text}</p>}
+     </section>
+   );
+diff -ruN a/client/src/components/ZoneCard.tsx b/client/src/components/ZoneCard.tsx
+--- a/client/src/components/ZoneCard.tsx	2026-10-21 23:52:58.375339387 +0530
++++ b/client/src/components/ZoneCard.tsx	2026-10-21 23:47:31.000000000 +0530
+@@ -1,44 +1,79 @@
+-import type { Zone } from "../../../shared/types";
++import type { Zone, ZoneStatus } from "../../../shared/types";
+ import { ZONE_TYPE_LABEL } from "../../../shared/floorplan";
++import Icon from "./icons";
+ 
+-const LABEL: Record<Zone["status"], string> = {
+-  normal: "Normal",
+-  warning: "Near limit",
+-  critical: "Out of range",
++const LABEL: Record<ZoneStatus, string> = { normal: "✓ Normal", warning: "▲ Near limit", critical: "✖ Out of range" };
++const STROKE: Record<ZoneStatus, string> = { normal: "#0f9d68", warning: "#f2a900", critical: "#d6264a" };
++
++// Semicircle dial, like a thermostat: the left end is the zone's minimum, the right end its maximum.
++const CX = 120, CY = 118, R = 92;
++const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
++const pt = (f: number, r = R) => [CX + r * Math.cos(Math.PI * (1 - f)), CY - r * Math.sin(Math.PI * (1 - f))] as const;
++const arc = (f0: number, f1: number) => {
++  const [x0, y0] = pt(f0), [x1, y1] = pt(f1);
++  return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${R} ${R} 0 0 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+ };
+ 
++function Gauge({ zone }: { zone: Zone }) {
++  const { minC, maxC, warnMarginC, temperatureC, minCellC, maxCellC, status } = zone;
++  const range = Math.max(1e-6, maxC - minC);
++  const frac = (t: number) => (t - minC) / range;
++  const f = clamp(frac(temperatureC), 0, 1);
++  const wf = clamp(warnMarginC / range, 0, 0.5);
++  const [kx, ky] = pt(f);
++  const tick = (t: number) => {
++    const g = clamp(frac(t), 0, 1), [x0, y0] = pt(g, R - 12), [x1, y1] = pt(g, R + 12);
++    return { x0, y0, x1, y1 };
++  };
++  const lo = tick(minCellC), hi = tick(maxCellC);
++  const color = STROKE[status];
++  return (
++    <svg className="gauge" viewBox="0 0 240 150" role="img" aria-label={`${zone.name}: ${temperatureC.toFixed(1)} °C, limits ${minC} to ${maxC} °C`}>
++      <path d={arc(0, 1)} fill="none" stroke="#e8eaed" strokeWidth={14} strokeLinecap="round" />
++      {wf > 0.01 && <path d={arc(0, wf)} fill="none" stroke="#fde7a6" strokeWidth={14} strokeLinecap="round" />}
++      {wf > 0.01 && <path d={arc(1 - wf, 1)} fill="none" stroke="#fde7a6" strokeWidth={14} strokeLinecap="round" />}
++      {f > 0.004 && <path d={arc(0, f)} fill="none" style={{ stroke: color }} strokeWidth={14} strokeLinecap="round" />}
++      <line x1={lo.x0} y1={lo.y0} x2={lo.x1} y2={lo.y1} stroke="#111214" strokeOpacity={0.45} strokeWidth={2.5} strokeLinecap="round" />
++      <line x1={hi.x0} y1={hi.y0} x2={hi.x1} y2={hi.y1} stroke="#111214" strokeOpacity={0.45} strokeWidth={2.5} strokeLinecap="round" />
++      <circle cx={kx} cy={ky} r={11} fill="#fff" style={{ stroke: color }} strokeWidth={5} />
++      <text className="num" x={CX} y={CY - 4} textAnchor="middle">
++        {temperatureC.toFixed(1)}<tspan className="unit" dx={3}>°C</tspan>
++      </text>
++      <text className="lab" x={CX} y={CY + 16} textAnchor="middle">Temperature</text>
++      <text className="end" x={CX - R} y={CY + 30} textAnchor="middle">{minC}°C</text>
++      <text className="end" x={CX + R} y={CY + 30} textAnchor="middle">{maxC}°C</text>
++    </svg>
++  );
++}
++
+ export default function ZoneCard({ zone }: { zone: Zone }) {
+-  const { name, type, temperatureC, minC, maxC, warnMarginC, status } = zone;
+-  // Position of the reading on the min–max bar, clamped to 0–100%.
+-  const pct = Math.min(100, Math.max(0, ((temperatureC - minC) / (maxC - minC)) * 100));
++  const { name, type, status, ai } = zone;
++  const icon = type === "cold-storage" ? "snowflake" : type === "hot-process" ? "flame" : "factory";
++  const tone = type === "cold-storage" ? "cold" : type === "hot-process" ? "hot" : "";
+   return (
+-    <article className={`card ${status}`}>
+-      <header>
+-        <h2>{name}</h2>
+-        <span className="badge">{LABEL[status]}</span>
++    <article className={`zcard ${status}`}>
++      <header className="zhead">
++        <span className={`zicon ${tone}`}><Icon name={icon} size={22} /></span>
++        <div className="grow">
++          <h2>{name}</h2>
++          <small>{ZONE_TYPE_LABEL[type]}</small>
++        </div>
++        <span className={`status ${status}`}>{LABEL[status]}</span>
+       </header>
+-      <p className="ztype">{ZONE_TYPE_LABEL[type]}</p>
+-      <p className="temp">
+-        {temperatureC.toFixed(1)}
+-        <span>°C</span>
+-      </p>
+-      <div className="range" aria-hidden="true">
+-        <div className="marker" style={{ left: `${pct}%` }} />
+-      </div>
+-      <p className="limits">
+-        <span>Min {minC} °C</span>
+-        <span>Max {maxC} °C</span>
++      <Gauge zone={zone} />
++      <p className="zmeta">
++        <span>Coldest {zone.minCellC} °C</span>
++        <span>Hottest {zone.maxCellC} °C</span>
+       </p>
+-      <p className="ztype">Coldest cell {zone.minCellC} °C · hottest cell {zone.maxCellC} °C</p>
+-      <p className="ztype">Warning within {warnMarginC} °C of a limit</p>
+-      {zone.ai && (
+-        <div className={`ai ${zone.ai.alert ? "on" : ""}`} role="status">
++      <p className="zmeta"><span>Warning within {zone.warnMarginC} °C of a limit</span></p>
++      {ai && (
++        <div className={`ai ${ai.alert ? "on" : ""}`} role="status">
+           <div className="ai-head">
+-            <span>AI forecast</span>
+-            <b>{zone.ai.alert ? (status === "critical" ? "✖ OUT OF RANGE" : "⚠ EARLY WARNING") : "Stable"}</b>
++            <span className="l"><Icon name="sparkle" size={16} /> AI forecast</span>
++            <b>{ai.alert ? (status === "critical" ? "✖ OUT OF RANGE" : "⚠ EARLY WARNING") : "✓ Stable"}</b>
+           </div>
+-          <div className="ai-bar" aria-hidden="true"><div style={{ width: `${Math.round(zone.ai.risk * 100)}%` }} /></div>
+-          <small>{Math.round(zone.ai.risk * 100)}% risk of leaving the limits within {zone.ai.horizon} steps</small>
++          <div className="ai-bar" aria-hidden="true"><div style={{ width: `${Math.round(ai.risk * 100)}%` }} /></div>
++          <small>{Math.round(ai.risk * 100)}% risk of leaving the limits within {ai.horizon} steps</small>
+         </div>
+       )}
+     </article>
+diff -ruN a/client/src/components/icons.tsx b/client/src/components/icons.tsx
+--- a/client/src/components/icons.tsx	1970-01-01 05:30:00.000000000 +0530
++++ b/client/src/components/icons.tsx	2026-10-21 16:17:37.000000000 +0530
+@@ -0,0 +1,41 @@
++import type { ReactNode } from "react";
++
++// One small stroke-icon set (24 x 24, rounded ends) so the whole platform looks like one product.
++const P: Record<string, ReactNode> = {
++  home: <path d="M3.5 11.2 12 4l8.5 7.2V19a1.5 1.5 0 0 1-1.5 1.5h-4v-5.5h-6v5.5H5A1.5 1.5 0 0 1 3.5 19z" />,
++  flame: <path d="M12 3c.8 3.2 5.2 5.2 5.2 9.8a5.2 5.2 0 0 1-10.4 0c0-2 .9-3.3 2-4.4.3 1.3.9 1.9 1.9 2.4C10.3 8.3 10.4 5.4 12 3z" />,
++  layout: (<><rect x="3.5" y="3.5" width="7.5" height="7.5" rx="2" /><rect x="13" y="3.5" width="7.5" height="4.5" rx="2" /><rect x="13" y="10" width="7.5" height="10.5" rx="2" /><rect x="3.5" y="13" width="7.5" height="7.5" rx="2" /></>),
++  sliders: (<><path d="M4 7h9M17 7h3M4 17h3M11 17h9" /><circle cx="15" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></>),
++  bell: (<><path d="M6 16.5V11a6 6 0 1 1 12 0v5.5l1.5 2h-15z" /><path d="M10 21a2 2 0 0 0 4 0" /></>),
++  search: (<><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4.5 4.5" /></>),
++  back: <path d="m15 5-7 7 7 7" />,
++  next: <path d="m9 5 7 7-7 7" />,
++  arrow: <path d="M5 12h14m-6-6 6 6-6 6" />,
++  snowflake: (<><path d="M12 3v18M4.2 7.5l15.6 9M19.8 7.5l-15.6 9" /><path d="m9.5 4.5 2.5 2 2.5-2M9.5 19.5l2.5-2 2.5 2" /></>),
++  factory: <path d="M3.5 20.5V9.5l6 3.5V9.5l6 3.5V5.5h3a1 1 0 0 1 1 1v14z" />,
++  thermo: <path d="M10 14.6V5a2 2 0 1 1 4 0v9.6a4 4 0 1 1-4 0z" />,
++  plus: <path d="M12 5v14M5 12h14" />,
++  check: <path d="m5 12.5 4.5 4.5L19 7.5" />,
++  alert: (<><path d="M12 4 2.8 19.5h18.4z" /><path d="M12 10v4.5M12 17.2v.3" /></>),
++  stop: (<><circle cx="12" cy="12" r="9" /><path d="m9 9 6 6m0-6-6 6" /></>),
++  sparkle: <path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM18.5 16l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z" />,
++  cube: (<><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z" /><path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" /></>),
++  map: (<><path d="M3.5 6.5 9 4l6 2.5L20.5 4v13.5L15 20l-6-2.5L3.5 20z" /><path d="M9 4v13.5M15 6.5V20" /></>),
++  power: <path d="M12 3.5v8M6.6 6.8a7.5 7.5 0 1 0 10.8 0" />,
++  pause: <path d="M8 5v14M16 5v14" />,
++  play: <path d="m7 4.5 12 7.5-12 7.5z" />,
++  reset: <path d="M4 12a8 8 0 1 0 2.6-5.9M4 4v4.5h4.5" />,
++  trash: <path d="M5 7h14M9.5 7V4.5h5V7M7 7l.8 12.5h8.4L17 7" />,
++  volume: <path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5zM15.5 9a4 4 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11" />,
++  mute: <path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5zM16 9.5l5 5m0-5-5 5" />,
++};
++
++export type IconName = keyof typeof P;
++
++export default function Icon({ name, size = 22, className }: { name: IconName; size?: number; className?: string }) {
++  return (
++    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
++      {P[name]}
++    </svg>
++  );
++}
+diff -ruN a/client/src/factory3d/FactoryScene.ts b/client/src/factory3d/FactoryScene.ts
+--- a/client/src/factory3d/FactoryScene.ts	2026-10-21 23:52:58.375474182 +0530
++++ b/client/src/factory3d/FactoryScene.ts	2026-10-21 23:49:46.000000000 +0530
+@@ -13,8 +13,8 @@
+  */
+ const WALL_H = 46;
+ const OUTER_H = 62;
+-const STATUS_HEX: Record<ZoneStatus, number> = { normal: 0x3fb68b, warning: 0xe0a43a, critical: 0xff4a50 };
+-const STATUS_CSS: Record<ZoneStatus, string> = { normal: "#3fb68b", warning: "#e0a43a", critical: "#ff6a6f" };
++const STATUS_HEX: Record<ZoneStatus, number> = { normal: 0x0f9d68, warning: 0xf2a900, critical: 0xd6264a };
++const STATUS_CSS: Record<ZoneStatus, string> = { normal: "#0f9d68", warning: "#b57f00", critical: "#d6264a" };
+ const STATUS_TEXT: Record<ZoneStatus, string> = { normal: "OK", warning: "▲ WARNING", critical: "✖ CRITICAL" };
+ 
+ export interface Probe { x: number; y: number; text: string }
+@@ -38,9 +38,9 @@
+   const c = document.createElement("canvas");
+   c.width = 512; c.height = 176;
+   const g = c.getContext("2d")!;
+-  g.fillStyle = "rgba(8,14,18,.82)";
++  g.fillStyle = "rgba(255,255,255,.94)";
+   g.beginPath(); g.roundRect(4, 4, 504, 168, 18); g.fill();
+-  g.strokeStyle = "rgba(255,255,255,.25)"; g.lineWidth = 3; g.stroke();
++  g.strokeStyle = "rgba(29,32,37,.16)"; g.lineWidth = 3; g.stroke();
+   let y = 18;
+   for (const l of lines) {
+     g.font = `700 ${l.size}px 'Segoe UI', sans-serif`;
+@@ -84,7 +84,7 @@
+   constructor(private el: HTMLElement) {
+     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+-    this.renderer.setClearColor(0x0b1115);
++    this.renderer.setClearColor(0xeceff2);
+     el.appendChild(this.renderer.domElement);
+     this.renderer.domElement.style.display = "block";
+     this.renderer.domElement.style.width = "100%";
+@@ -101,8 +101,8 @@
+     this.controls.target.set(0, 0, 20);
+     this.controls.update();
+ 
+-    this.scene.background = new THREE.Color(0x0b1115);
+-    this.scene.fog = new THREE.Fog(0x0b1115, 1600, 3200);
++    this.scene.background = new THREE.Color(0xeceff2);
++    this.scene.fog = new THREE.Fog(0xeceff2, 1800, 3600);
+     this.scene.add(new THREE.AmbientLight(0xffffff, 1.15));
+     const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+     sun.position.set(-420, 900, 520);
+@@ -112,7 +112,7 @@
+     this.scene.add(fill);
+ 
+     // base slab under the whole plan, so the factory looks like a solid block
+-    const slab = new THREE.Mesh(new THREE.BoxGeometry(PLAN_WIDTH + 24, 14, PLAN_HEIGHT + 24), new THREE.MeshLambertMaterial({ color: 0x1a252c }));
++    const slab = new THREE.Mesh(new THREE.BoxGeometry(PLAN_WIDTH + 24, 14, PLAN_HEIGHT + 24), new THREE.MeshLambertMaterial({ color: 0xd9dee4 }));
+     slab.position.y = -7.5;
+     this.scene.add(slab);
+ 
+@@ -164,8 +164,8 @@
+     this.clearRoot();
+     if (!plan) return;
+ 
+-    const wallMat = new THREE.MeshLambertMaterial({ color: 0xdfe8ec, transparent: true, opacity: 0.3, depthWrite: false });
+-    const edgeMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 });
++    const wallMat = new THREE.MeshLambertMaterial({ color: 0x9fb0bb, transparent: true, opacity: 0.22, depthWrite: false });
++    const edgeMat = new THREE.LineBasicMaterial({ color: 0x6b7783, transparent: true, opacity: 0.75 });
+     const box = (w: number, h: number, d: number, mat: THREE.Material, at: THREE.Vector3, edges = true) => {
+       const geo = new THREE.BoxGeometry(w, h, d);
+       const m = new THREE.Mesh(geo, mat);
+@@ -176,7 +176,7 @@
+     };
+ 
+     // outer walls
+-    const outer = new THREE.MeshLambertMaterial({ color: 0xcfd9de, transparent: true, opacity: 0.16, depthWrite: false });
++    const outer = new THREE.MeshLambertMaterial({ color: 0xaab7c0, transparent: true, opacity: 0.14, depthWrite: false });
+     const T = 6;
+     box(PLAN_WIDTH + T, OUTER_H, T, outer, new THREE.Vector3(0, OUTER_H / 2, -PLAN_HEIGHT / 2));
+     box(PLAN_WIDTH + T, OUTER_H, T, outer, new THREE.Vector3(0, OUTER_H / 2, PLAN_HEIGHT / 2));
+@@ -199,7 +199,7 @@
+       layoutEquipment(z).forEach((it) => this.addEquipment(it));
+ 
+       // label + status beacon
+-      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture([{ text: z.name, colour: "#f2f7f9", size: 44 }]), depthTest: false, transparent: true }));
++      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture([{ text: z.name, colour: "#1d2025", size: 44 }]), depthTest: false, transparent: true }));
+       sprite.scale.set(122, 42, 1);
+       sprite.position.set(c.x, WALL_H + 30, c.z);
+       sprite.renderOrder = 10;
+@@ -211,7 +211,7 @@
+     }
+ 
+     for (const ex of plan.exits) {
+-      const m = new THREE.Mesh(new THREE.OctahedronGeometry(9), new THREE.MeshBasicMaterial({ color: 0x4cc3ff }));
++      const m = new THREE.Mesh(new THREE.OctahedronGeometry(9), new THREE.MeshBasicMaterial({ color: 0x1d6fb8 }));
+       const p = toScene(ex.x, ex.y);
+       m.position.set(p.x, 14, p.z);
+       this.root.add(m);
+@@ -311,11 +311,11 @@
+       const lz = live.get(id);
+       const status = lz?.status ?? "normal";
+       (zr.beacon.material as THREE.MeshBasicMaterial).color.setHex(STATUS_HEX[status]);
+-      const lines = [{ text: zr.zone.name, colour: "#f2f7f9", size: 42 }];
+-      if (lz) lines.push({ text: `${lz.temperatureC.toFixed(1)} °C   max ${lz.maxCellC.toFixed(1)}`, colour: "#d3e0e5", size: 34 });
++      const lines = [{ text: zr.zone.name, colour: "#1d2025", size: 42 }];
++      if (lz) lines.push({ text: `${lz.temperatureC.toFixed(1)} °C   max ${lz.maxCellC.toFixed(1)}`, colour: "#5b6470", size: 34 });
+       if (lz && status !== "normal") lines.push({ text: STATUS_TEXT[status], colour: STATUS_CSS[status], size: 34 });
+-      else if (lz?.ai?.alert) lines.push({ text: "⚠ AI EARLY WARNING", colour: "#e0a43a", size: 34 });
+-      else if (failed.has(id)) lines.push({ text: "❄ COOLER FAILED", colour: "#ffffff", size: 34 });
++      else if (lz?.ai?.alert) lines.push({ text: "⚠ AI EARLY WARNING", colour: "#b57f00", size: 34 });
++      else if (failed.has(id)) lines.push({ text: "❄ COOLER FAILED", colour: "#1d6fb8", size: 34 });
+       const key = lines.map((l) => l.text).join("|") + (failed.has(id) ? "f" : "");
+       if (key !== zr.text) {
+         zr.text = key;
+diff -ruN a/client/src/styles.css b/client/src/styles.css
+--- a/client/src/styles.css	2026-10-21 23:52:58.375606720 +0530
++++ b/client/src/styles.css	2026-10-21 23:51:45.000000000 +0530
+@@ -1,118 +1,241 @@
++/* =====================================================================
++   THERMAL GUARD — design system
++   Light, soft and rounded: white cards on light grey, one orange accent,
++   big bold headings, pill chips, gauge dials and a floating dark dock.
++   Status colours (green / amber / crimson) are separate from the brand
++   orange, and every status also has a word and a symbol.
++   ===================================================================== */
+ :root {
+-  --bg: #0d1317; --panel: #151e24; --line: #243139; --text: #dce6ea; --dim: #8396a0;
+-  --ok: #3fb68b; --warn: #e0a43a; --bad: #e5484d;
++  --bg: #eceef0; --bg-2: #f4f5f6; --card: #ffffff; --card-2: #f5f6f7;
++  --ink: #111214; --ink-2: #3a3d42; --muted: #666a71; --line: #e4e6e9;
++  --accent: #d93b0a; --accent-2: #ff7a4d; --accent-soft: #fde8e0;
++  --dark: #1b1c1e; --dark-2: #2c2d30;
++  --ok: #0f9d68; --ok-soft: #ddf4ea;
++  --warn: #b97800; --warn-fill: #f2a900; --warn-soft: #fff0cc;
++  --bad: #d6264a; --bad-soft: #fde1e7;
++  --info: #1b6fe0;
++  --shadow: 0 1px 0 rgba(255,255,255,.95) inset, 0 14px 34px rgba(24,26,32,.07), 0 2px 6px rgba(24,26,32,.04);
++  --shadow-sm: 0 1px 0 rgba(255,255,255,.95) inset, 0 6px 16px rgba(24,26,32,.06);
++  --r-lg: 30px; --r-md: 22px; --r-sm: 14px;
++  --font: "Plus Jakarta Sans", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+ }
+ * { box-sizing: border-box; }
+-body { margin: 0; background: var(--bg); color: var(--text); font-family: "Segoe UI", system-ui, sans-serif; }
+-.page { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+-.top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 24px; }
+-h1 { margin: 0 0 6px; font-size: 1.6rem; letter-spacing: .02em; }
+-.sim { display: inline-block; padding: 2px 10px; border: 1px solid var(--warn); color: var(--warn); border-radius: 4px; font-size: .75rem; font-weight: 600; letter-spacing: .08em; }
+-.meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+-.meta small { color: var(--dim); }
+-.conn { padding: 3px 12px; border-radius: 999px; font-size: .85rem; border: 1px solid currentColor; }
++html { -webkit-text-size-adjust: 100%; }
++body {
++  margin: 0; color: var(--ink); font-family: var(--font); font-size: 15px; line-height: 1.45;
++  background: radial-gradient(1200px 600px at 85% -10%, #f9f9fa 0%, transparent 60%), var(--bg);
++  min-height: 100vh;
++}
++button { font-family: inherit; }
++:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 2px; }
++
++/* ---------- shell ---------- */
++.app { max-width: 1180px; margin: 0 auto; padding: 22px 20px 150px; }
++.appbar { display: flex; align-items: center; gap: 14px; margin-bottom: 26px; }
++.avatar { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 800; letter-spacing: .02em;
++  background: linear-gradient(145deg, var(--accent-2), var(--accent)); box-shadow: 0 8px 18px rgba(217,59,10,.28); flex: none; }
++.hello { min-width: 0; }
++.hello b { display: block; font-size: 1.05rem; font-weight: 700; }
++.hello span { color: var(--muted); font-size: .9rem; }
++.appbar .grow { flex: 1; }
++.pill-sim { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: .68rem; font-weight: 800; letter-spacing: .09em; color: var(--warn); background: var(--warn-soft); }
++.conn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: 999px; background: var(--card); box-shadow: var(--shadow-sm); font-size: .85rem; font-weight: 600; }
++.conn::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+ .conn.connected { color: var(--ok); } .conn.connecting { color: var(--warn); } .conn.disconnected { color: var(--bad); }
+-.alert { background: #2a1517; border: 1px solid var(--bad); color: #ffb4b6; padding: 10px 14px; border-radius: 6px; }
+-.empty { color: var(--dim); }
+-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; transition: opacity .3s; }
++.conn span { color: var(--ink-2); }
++.round-btn { position: relative; width: 52px; height: 52px; border-radius: 50%; border: 0; background: var(--card); box-shadow: var(--shadow-sm); color: var(--ink); display: grid; place-items: center; cursor: pointer; flex: none; }
++.round-btn:hover { box-shadow: var(--shadow); }
++.round-btn .count { position: absolute; top: 2px; right: 2px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px; background: var(--bad); color: #fff; font-size: .72rem; font-weight: 800; display: grid; place-items: center; border: 2px solid var(--bg); }
++.title { margin: 0 0 22px; font-size: clamp(2rem, 4.6vw, 3rem); line-height: 1.04; font-weight: 800; letter-spacing: -.025em; }
++.title em { font-style: normal; color: var(--accent); }
++
++/* chips */
++.chips { display: flex; gap: 10px; overflow-x: auto; padding: 4px 2px 10px; margin: 0 -2px 18px; scrollbar-width: none; }
++.chips::-webkit-scrollbar { display: none; }
++.chip { flex: none; border: 0; cursor: pointer; padding: 11px 20px; border-radius: 999px; background: var(--card); color: var(--ink); font-weight: 600; font-size: .95rem; box-shadow: var(--shadow-sm); }
++.chip:hover { box-shadow: var(--shadow); }
++.chip.on { background: var(--accent); color: #fff; box-shadow: 0 8px 18px rgba(217,59,10,.3); }
++
++/* floating dock (the dark pill with the orange active button) */
++.dock { position: fixed; left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60; display: flex; gap: 8px; padding: 9px; border-radius: 999px;
++  background: var(--dark); box-shadow: 0 18px 40px rgba(10,10,14,.35), 0 0 0 5px rgba(255,255,255,.55); }
++.dock button { display: flex; align-items: center; gap: 8px; height: 54px; min-width: 54px; justify-content: center; padding: 0 16px; border: 0; border-radius: 999px; background: var(--dark-2); color: #d6d8dc; cursor: pointer; font-weight: 700; font-size: .92rem; transition: background .2s, color .2s; }
++.dock button:hover { background: #3a3b3f; color: #fff; }
++.dock button.on { background: var(--accent); color: #fff; box-shadow: 0 6px 16px rgba(217,59,10,.5); }
++.dock button span { display: none; }
++.dock button.on span { display: inline; }
++
++/* ---------- generic pieces ---------- */
++.card { background: var(--card); border-radius: var(--r-lg); box-shadow: var(--shadow); }
++.btn { display: inline-flex; align-items: center; gap: 8px; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 10px 18px; font: inherit; font-weight: 600; font-size: .9rem; cursor: pointer; box-shadow: var(--shadow-sm); }
++.btn:hover:not(:disabled) { border-color: #c9ccd1; box-shadow: var(--shadow); }
++.btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
++.btn.on, .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 8px 18px rgba(217,59,10,.28); }
++.btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); background: #fff; }
++.btn.dark { background: var(--dark); border-color: var(--dark); color: #fff; }
++.sep { width: 1px; height: 26px; background: var(--line); margin: 0 4px; }
++.hint { color: var(--muted); font-size: .86rem; margin: 8px 0; }
++.empty { color: var(--muted); }
++.alert { background: var(--bad-soft); color: #8d1230; padding: 12px 16px; border-radius: var(--r-sm); font-weight: 600; }
++.field-error { margin: 0 0 8px; font-size: .86rem; color: var(--bad); font-weight: 600; }
++.field-ok { margin: 0 0 8px; font-size: .86rem; color: var(--ok); font-weight: 600; }
++input, select { font-family: inherit; }
++.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
++.seg { display: inline-flex; padding: 4px; gap: 4px; border-radius: 999px; background: var(--card); box-shadow: var(--shadow-sm); }
++.seg .btn { border: 0; box-shadow: none; background: transparent; padding: 9px 18px; }
++.seg .btn.on { background: var(--accent); color: #fff; box-shadow: 0 6px 14px rgba(217,59,10,.3); }
++.heatview select, .simbox select, .details input, .limits-form input, .limits-form select {
++  padding: 10px 14px; background: var(--card-2); color: var(--ink); border: 1px solid transparent; border-radius: var(--r-sm); font: inherit; font-weight: 500; }
++.heatview select { background: var(--card); box-shadow: var(--shadow-sm); border-radius: 999px; padding: 10px 16px; font-weight: 600; }
++.heatview .inline { display: inline-flex; align-items: center; gap: 8px; font-size: .85rem; color: var(--muted); font-weight: 600; }
++input:focus, select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
++
++/* ---------- dashboard ---------- */
++.hero { border-radius: var(--r-lg); padding: 14px; margin-bottom: 22px; background: linear-gradient(135deg, #ff7a4d 0%, #f7a58a 55%, #fbd3c4 100%); box-shadow: var(--shadow); }
++.hero-in { background: var(--card); border-radius: 22px; padding: 20px 22px; display: grid; gap: 14px; grid-template-columns: 1fr auto; align-items: center; }
++.hero-in h2 { margin: 0 0 6px; font-size: 1.35rem; font-weight: 800; letter-spacing: -.01em; }
++.hero-in p { margin: 0; color: var(--muted); }
++.hero-tags { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
++.tag { padding: 4px 12px; border-radius: 999px; font-size: .74rem; font-weight: 700; background: #e9e8ff; color: #4a43b8; }
++.tag.warm { background: #fdebd0; color: #8a5200; } .tag.good { background: var(--ok-soft); color: #0b6f48; } .tag.bad { background: var(--bad-soft); color: #9d1a38; }
++.kpis { display: flex; gap: 10px; }
++.kpi { min-width: 92px; padding: 12px 14px; border-radius: 18px; background: var(--card-2); text-align: left; }
++.kpi b { display: block; font-size: 1.7rem; font-weight: 800; line-height: 1; letter-spacing: -.02em; }
++.kpi span { font-size: .78rem; color: var(--muted); font-weight: 600; }
++.kpi.bad b { color: var(--bad); } .kpi.warn b { color: var(--warn); } .kpi.good b { color: var(--ok); }
++@media (max-width: 720px) { .hero-in { grid-template-columns: 1fr; } .kpis { flex-wrap: wrap; } .kpi { flex: 1; } }
++
++.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 18px; transition: opacity .3s; }
+ .grid.stale { opacity: .45; }
+-.card { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 8px; padding: 16px; }
+-.card.warning { border-left-color: var(--warn); } .card.critical { border-left-color: var(--bad); }
+-.card header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+-.card h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+-.badge { font-size: .75rem; color: var(--ok); } .warning .badge { color: var(--warn); } .critical .badge { color: var(--bad); }
+-.temp { margin: 14px 0 12px; font-size: 2.6rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+-.temp span { font-size: 1.1rem; color: var(--dim); margin-left: 4px; }
+-.range { position: relative; height: 6px; background: var(--line); border-radius: 3px; }
+-.marker { position: absolute; top: -4px; width: 4px; height: 14px; margin-left: -2px; background: var(--text); border-radius: 2px; transition: left .8s linear; }
+-.limits { display: flex; justify-content: space-between; margin: 10px 0 0; color: var(--dim); font-size: .85rem; }
+-
+-/* ---- navigation + floor-plan editor ---- */
+-.tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+-.tabs button { background: none; border: 1px solid var(--line); color: var(--dim); padding: 6px 16px; border-radius: 6px; font: inherit; cursor: pointer; }
+-.tabs button.on { color: var(--text); border-color: var(--dim); background: var(--panel); }
+-.editor { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 16px; align-items: start; }
+-@media (max-width: 860px) { .editor { grid-template-columns: 1fr; } }
+-.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+-.btn { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; font: inherit; font-size: .9rem; cursor: pointer; }
+-.btn:hover:not(:disabled) { border-color: var(--dim); }
+-.btn:disabled { opacity: .45; cursor: not-allowed; }
+-.btn.on { border-color: var(--ok); color: var(--ok); }
+-.btn.danger { border-color: var(--bad); color: #ffb4b6; }
+-.sep { width: 1px; height: 22px; background: var(--line); }
+-.savestate { margin-left: auto; font-size: .85rem; color: var(--dim); }
++.zcard { position: relative; background: var(--card); border-radius: var(--r-lg); padding: 20px 20px 18px; box-shadow: var(--shadow); border: 2px solid transparent; }
++.zcard.warning { border-color: color-mix(in srgb, var(--warn-fill) 70%, transparent); }
++.zcard.critical { border-color: color-mix(in srgb, var(--bad) 65%, transparent); }
++.zhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
++.zicon { width: 44px; height: 44px; border-radius: 50%; background: var(--card-2); display: grid; place-items: center; color: var(--ink-2); flex: none; }
++.zicon.cold { color: var(--info); background: #e5efff; } .zicon.hot { color: var(--accent); background: var(--accent-soft); }
++.zhead h2 { margin: 0; font-size: 1.05rem; font-weight: 700; line-height: 1.2; }
++.zhead small { color: var(--muted); font-size: .8rem; }
++.zhead .grow { flex: 1 1 110px; min-width: 0; }
++.zhead .status { margin-left: auto; }
++.status { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 999px; font-size: .75rem; font-weight: 800; white-space: nowrap; }
++.status.normal { background: var(--ok-soft); color: #0b6f48; }
++.status.warning { background: var(--warn-soft); color: #8a5a00; }
++.status.critical { background: var(--bad-soft); color: #a0173a; }
++.gauge { display: block; width: 100%; height: auto; margin: 6px 0 0; overflow: visible; }
++.gauge .num { font-size: 40px; font-weight: 800; fill: var(--ink); letter-spacing: -1px; }
++.gauge .unit { font-size: 17px; font-weight: 700; fill: var(--muted); }
++.gauge .lab { font-size: 12.5px; font-weight: 600; fill: var(--muted); }
++.gauge .end { font-size: 12px; font-weight: 700; fill: var(--ink-2); }
++.zmeta { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0 0; color: var(--muted); font-size: .82rem; font-weight: 500; }
++.ai { margin-top: 14px; padding: 12px 14px; border-radius: 18px; background: var(--card-2); }
++.ai-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: .82rem; font-weight: 700; color: var(--ink-2); }
++.ai-head .l { display: inline-flex; align-items: center; gap: 6px; }
++.ai-head b { font-size: .76rem; letter-spacing: .03em; color: #0b6f48; }
++.ai.on { background: var(--warn-soft); } .ai.on .ai-head b { color: #8a5a00; }
++.zcard.critical .ai.on { background: var(--bad-soft); } .zcard.critical .ai.on .ai-head b { color: #a0173a; }
++.ai-bar { height: 8px; background: rgba(17,18,20,.09); border-radius: 999px; margin: 9px 0 6px; overflow: hidden; }
++.ai-bar div { height: 100%; background: var(--ok); border-radius: 999px; transition: width .6s linear; }
++.ai.on .ai-bar div { background: var(--warn-fill); } .zcard.critical .ai.on .ai-bar div { background: var(--bad); }
++.ai small { color: var(--muted); font-size: .78rem; }
++
++/* ---------- alerts ---------- */
++.banner { display: flex; gap: 14px; align-items: flex-start; background: var(--card); border-radius: var(--r-md); padding: 16px 18px; margin-bottom: 20px; box-shadow: var(--shadow); border: 2px solid var(--bad); }
++.banner .ico { width: 42px; height: 42px; border-radius: 50%; background: var(--bad); color: #fff; display: grid; place-items: center; flex: none; }
++.banner strong { display: block; font-size: 1rem; font-weight: 800; color: var(--bad); letter-spacing: .02em; }
++.banner ul { margin: 6px 0 0; padding-left: 18px; color: var(--ink-2); }
++.feed { margin-top: 30px; scroll-margin-top: 20px; }
++.feed-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
++.feed-head h2 { margin: 0 auto 0 0; font-size: 1.5rem; font-weight: 800; letter-spacing: -.02em; }
++.switch { display: inline-flex; align-items: center; gap: 10px; border: 0; background: none; cursor: pointer; font: inherit; font-weight: 600; font-size: .9rem; color: var(--ink-2); padding: 0; }
++.switch i { position: relative; width: 56px; height: 32px; border-radius: 999px; background: #d3d5d9; transition: background .2s; flex: none; }
++.switch i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 26px; height: 26px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.25); transition: transform .2s; }
++.switch[aria-checked="true"] i { background: var(--accent); }
++.switch[aria-checked="true"] i::after { transform: translateX(24px); }
++.alert-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
++.alert-item { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; align-items: start; background: var(--card); border-radius: var(--r-md); padding: 14px 18px; box-shadow: var(--shadow-sm); }
++.alert-item .dot { grid-row: span 3; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: var(--warn-soft); color: var(--warn); }
++.alert-item.critical .dot { background: var(--bad-soft); color: var(--bad); }
++.alert-item.resolved { opacity: .62; }
++.alert-item .top { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
++.alert-item .sev { font-weight: 800; font-size: .78rem; letter-spacing: .05em; color: var(--warn); }
++.alert-item.critical .sev { color: var(--bad); }
++.alert-item .kind { color: var(--muted); font-size: .84rem; }
++.alert-item small { color: var(--muted); }
++
++/* ---------- heatmap ---------- */
++.stage3d { position: relative; width: 100%; aspect-ratio: 16 / 9; min-height: 380px; border-radius: var(--r-lg); overflow: hidden; background: #eceef0; box-shadow: var(--shadow); touch-action: none; cursor: grab; }
++.stage3d:active { cursor: grabbing; }
++canvas { display: block; width: 100%; }
++.heatwrap { position: relative; border-radius: var(--r-lg); overflow: hidden; box-shadow: var(--shadow); background: #f1f2f4; }
++.heatwrap canvas, .canvaswrap canvas { aspect-ratio: 1000 / 600; touch-action: none; }
++.canvaswrap { width: 100%; position: relative; }
++.probe { position: absolute; pointer-events: none; background: var(--dark); color: #fff; padding: 6px 12px; border-radius: 999px; font-size: .8rem; font-weight: 600; white-space: nowrap; z-index: 2; box-shadow: 0 8px 18px rgba(0,0,0,.25); }
++.legend { max-width: 560px; margin-top: 18px; padding: 14px 18px; background: var(--card); border-radius: var(--r-md); box-shadow: var(--shadow-sm); }
++.legend .bar { height: 12px; border-radius: 999px; }
++.legend .ticks { display: flex; justify-content: space-between; color: var(--muted); font-size: .8rem; font-weight: 600; margin-top: 6px; }
++.heat-empty { display: grid; gap: 14px; justify-items: start; }
++
++/* ---------- floor-plan editor ---------- */
++.editor { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; }
++@media (max-width: 900px) { .editor { grid-template-columns: 1fr; } }
++.stage canvas { border-radius: var(--r-lg); box-shadow: var(--shadow); }
++.savestate { margin-left: auto; font-size: .85rem; font-weight: 700; color: var(--muted); padding: 7px 14px; border-radius: 999px; background: var(--card); box-shadow: var(--shadow-sm); }
+ .savestate.saved { color: var(--ok); } .savestate.error { color: var(--bad); }
+-.canvaswrap { width: 100%; }
+-canvas { display: block; width: 100%; aspect-ratio: 1000 / 600; border: 1px solid var(--line); border-radius: 8px; touch-action: none; }
+-.hint { color: var(--dim); font-size: .85rem; margin: 8px 0; }
+-.side { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+-.side h2 { margin: 0 0 8px; font-size: 1rem; }
+-.list { list-style: none; margin: 0 0 12px; padding: 0; max-height: 220px; overflow-y: auto; }
+-.list button { width: 100%; text-align: left; background: none; border: 0; border-left: 3px solid transparent; color: var(--text); padding: 6px 8px; font: inherit; cursor: pointer; }
+-.list button.on { border-left-color: var(--ok); background: var(--bg); }
+-.details { border-top: 1px solid var(--line); padding-top: 12px; }
+-.details label { display: block; font-size: .85rem; color: var(--dim); }
+-.details input { display: block; width: 100%; margin-top: 4px; padding: 6px 8px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+-
+-/* ---- per-zone temperature limits ---- */
+-.limits-form { border-top: 1px solid var(--line); margin: 12px 0; padding-top: 12px; }
+-.limits-form h3 { margin: 0 0 6px; font-size: .95rem; }
+-.limits-form label { display: block; font-size: .85rem; color: var(--dim); margin-bottom: 8px; }
+-.limits-form select, .limits-form input { display: block; width: 100%; margin-top: 4px; padding: 6px 8px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+-.row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+-.saved-values { margin: 0 0 8px; font-size: .85rem; color: var(--ok); }
+-.field-error { margin: 0 0 8px; font-size: .85rem; color: #ffb4b6; }
+-.field-ok { margin: 0 0 8px; font-size: .85rem; color: var(--ok); }
+-.ztype { margin: 6px 0 0; font-size: .8rem; color: var(--dim); }
+-
+-/* ---- alerts + simulator controls (severity always has a text label and a symbol) ---- */
+-.banner { background: #3a1013; border: 2px solid var(--bad); color: #ffd7d9; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
+-.banner ul { margin: 6px 0 0; padding-left: 20px; }
+-.feed { margin-top: 24px; }
+-.feed-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+-.feed-head h2 { margin: 0 auto 0 0; font-size: 1.1rem; }
+-.alert-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+-.alert-item { display: grid; grid-template-columns: auto auto 1fr; gap: 4px 12px; align-items: baseline; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--warn); border-radius: 6px; padding: 10px 12px; }
+-.alert-item.critical { border-left-color: var(--bad); }
+-.alert-item.resolved { opacity: .6; }
+-.alert-item .sev { font-weight: 700; font-size: .85rem; letter-spacing: .04em; }
+-.alert-item.critical .sev { color: #ffb4b6; } .alert-item.warning .sev { color: var(--warn); }
+-.alert-item .kind { color: var(--dim); font-size: .85rem; }
+-.alert-item .why, .alert-item small { grid-column: 1 / -1; }
+-.alert-item small { color: var(--dim); }
+-.simbox { max-width: 640px; display: grid; gap: 14px; }
+-.simstatus { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
++.side { background: var(--card); border-radius: var(--r-lg); box-shadow: var(--shadow); padding: 20px; }
++.side h2 { margin: 0 0 10px; font-size: 1.15rem; font-weight: 800; }
++.list { list-style: none; margin: 0 0 14px; padding: 0; max-height: 230px; overflow-y: auto; display: grid; gap: 6px; }
++.list button { width: 100%; text-align: left; background: var(--card-2); border: 2px solid transparent; color: var(--ink); padding: 10px 14px; font: inherit; font-weight: 600; border-radius: 14px; cursor: pointer; }
++.list button.on { border-color: var(--accent); background: var(--accent-soft); }
++.details { border-top: 1px solid var(--line); padding-top: 14px; display: grid; gap: 4px; }
++.details label, .limits-form label { display: block; font-size: .82rem; color: var(--muted); font-weight: 600; margin-bottom: 8px; }
++.details input, .limits-form input, .limits-form select { display: block; width: 100%; margin-top: 5px; }
++.limits-form { border-top: 1px solid var(--line); margin: 14px 0; padding-top: 14px; }
++.limits-form h3 { margin: 0 0 6px; font-size: 1rem; font-weight: 800; }
++.row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
++.saved-values { margin: 0 0 10px; font-size: .84rem; color: var(--ok); font-weight: 600; }
++.ztype { margin: 6px 0 0; font-size: .8rem; color: var(--muted); }
++
++/* ---------- simulator ---------- */
++.simbox { max-width: 760px; display: grid; gap: 16px; }
++.simstatus { background: var(--card); border-radius: var(--r-md); box-shadow: var(--shadow-sm); padding: 16px 20px; }
+ .simstatus p { margin: 4px 0; }
+-.simbox label { display: block; font-size: .85rem; color: var(--dim); }
+-.simbox select, .simbox input { padding: 6px 8px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+-.simbox select { display: block; margin-top: 4px; min-width: 220px; }
+-.simrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+-.simrow input { width: 150px; }
+-
+-/* ---- heatmap view ---- */
+-.heatview .inline { display: inline-flex; align-items: center; gap: 8px; font-size: .85rem; color: var(--dim); }
+-.heatview select { padding: 5px 8px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+-.heatview input[type=range] { width: 110px; }
+-.heatstage { transition: padding .25s; }
+-.heatwrap { position: relative; transform-origin: 50% 60%; transition: transform .25s; box-shadow: 0 18px 40px rgba(0,0,0,.45); border-radius: 8px; }
+-.probe { position: absolute; pointer-events: none; background: rgba(8,14,18,.92); border: 1px solid var(--line); padding: 4px 8px; border-radius: 6px; font-size: .8rem; white-space: nowrap; z-index: 2; }
+-.legend { max-width: 520px; margin-top: 14px; }
+-.legend .bar { height: 12px; border-radius: 6px; border: 1px solid var(--line); }
+-.legend .ticks { display: flex; justify-content: space-between; color: var(--dim); font-size: .8rem; margin-top: 4px; }
+-.heat-empty { display: grid; gap: 12px; justify-items: start; }
+-.stage3d { position: relative; width: 100%; aspect-ratio: 16 / 9; min-height: 380px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #0b1115; touch-action: none; cursor: grab; }
+-.stage3d:active { cursor: grabbing; }
+-.seg { display: inline-flex; gap: 0; }
+-.seg .btn:first-child { border-radius: 6px 0 0 6px; } .seg .btn:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
++.simstatus .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
++.act { display: grid; grid-template-columns: 48px 1fr auto; gap: 4px 16px; align-items: center; background: var(--card); border-radius: var(--r-md); box-shadow: var(--shadow-sm); padding: 16px 18px; }
++.act .ai-ico { grid-row: span 2; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; background: var(--card-2); color: var(--ink-2); }
++.act .ai-ico.hot { background: var(--accent-soft); color: var(--accent); } .act .ai-ico.cold { background: #e5efff; color: var(--info); }
++.act h3 { margin: 0; font-size: 1rem; font-weight: 700; }
++.act p { margin: 0; color: var(--muted); font-size: .84rem; grid-column: 2; }
++.act .ctl { grid-column: 3; grid-row: 1 / span 2; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
++.act input { width: 130px; padding: 10px 14px; background: var(--card-2); border: 1px solid transparent; border-radius: 14px; font-weight: 600; }
++@media (max-width: 640px) { .act { grid-template-columns: 48px 1fr; } .act .ctl { grid-column: 1 / -1; grid-row: auto; justify-content: flex-start; } }
++.simbox label.pick { font-size: .85rem; color: var(--muted); font-weight: 600; }
++.simbox select { display: block; margin-top: 6px; min-width: 240px; background: var(--card); box-shadow: var(--shadow-sm); }
++
++/* ---------- onboarding ---------- */
++.intro { position: fixed; inset: 0; z-index: 100; background: #fff; display: grid; grid-template-rows: 1fr auto; max-width: 520px; margin: 0 auto; }
++@media (min-width: 560px) { .intro { inset: 24px 0; border-radius: 44px; box-shadow: 0 0 0 9999px rgba(236,238,240,.96), var(--shadow); overflow: hidden; } }
++.intro-art { position: relative; margin: 14px 14px 0; border-radius: 34px; overflow: hidden; background: linear-gradient(160deg, #fff4ee, #f4f5f9); min-height: 240px; }
++.intro-art svg { position: absolute; inset: 0; width: 100%; height: 100%; }
++.intro .skip { position: absolute; top: 16px; right: 16px; z-index: 2; background: var(--accent); color: #fff; border: 0; border-radius: 999px; padding: 10px 22px; font-weight: 700; cursor: pointer; box-shadow: 0 8px 18px rgba(217,59,10,.35); }
++.intro-body { padding: 22px 26px calc(26px + env(safe-area-inset-bottom)); }
++.intro-body h1 { margin: 0 0 8px; font-size: 2.3rem; line-height: 1.04; font-weight: 800; letter-spacing: -.03em; }
++.intro-body h1 span { display: block; color: var(--muted); font-weight: 600; font-size: 1.9rem; }
++.intro-body p { margin: 0 0 4px; color: var(--muted); }
++.intro-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 22px; }
++.dots { display: flex; gap: 6px; padding: 10px 14px; border-radius: 999px; background: var(--card-2); }
++.dots i { width: 7px; height: 7px; border-radius: 50%; background: #cfd2d7; }
++.dots i.on { width: 28px; border-radius: 6px; background: var(--accent); }
++.pager { display: flex; gap: 8px; padding: 8px; border-radius: 999px; background: var(--dark); }
++.pager button { width: 52px; height: 52px; border-radius: 50%; border: 0; background: var(--dark-2); color: #fff; display: grid; place-items: center; cursor: pointer; }
++.pager button.go { background: var(--accent); }
++.pager button:disabled { opacity: .4; cursor: default; }
++.foot-link { margin: 28px 0 0; text-align: center; font-size: .82rem; color: var(--muted); }
++.foot-link button { border: 0; background: none; color: var(--accent); font: inherit; font-weight: 700; cursor: pointer; padding: 0; }
+ 
+-/* ---- AI forecast on zone cards ---- */
+-.ai { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: .85rem; }
+-.ai-head { display: flex; justify-content: space-between; color: var(--dim); }
+-.ai-head b { color: var(--ok); letter-spacing: .03em; }
+-.ai.on .ai-head b { color: var(--warn); }
+-.ai-bar { height: 6px; background: var(--line); border-radius: 3px; margin: 6px 0 4px; overflow: hidden; }
+-.ai-bar div { height: 100%; background: var(--ok); transition: width .6s linear; }
+-.ai.on .ai-bar div { background: var(--warn); }
+-.ai small { color: var(--dim); }
+-.card.critical .ai.on .ai-head b { color: #ff6a6f; }
+-.card.critical .ai.on .ai-bar div { background: var(--bad); }
++@media (max-width: 560px) {
++  .app { padding: 16px 14px 140px; }
++  .appbar .conn span { display: none; }
++  .dock button { padding: 0 14px; }
++}
++@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
++.flip { transform: scaleX(-1); }

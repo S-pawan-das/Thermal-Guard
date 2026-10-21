@@ -222,7 +222,7 @@ export default function FloorPlanEditor() {
     c.height = Math.max(1, Math.round((width * dpr * PLAN_HEIGHT) / PLAN_WIDTH));
     const k = c.width / PLAN_WIDTH;
     ctx.setTransform(k, 0, 0, k, 0, 0);
-    ctx.fillStyle = "#0b1115";
+    ctx.fillStyle = "#eceff2";
     ctx.fillRect(0, 0, PLAN_WIDTH, PLAN_HEIGHT);
 
     if (img) {
@@ -236,14 +236,14 @@ export default function FloorPlanEditor() {
 
     ctx.lineWidth = 1 / k;
     for (let x = 0; x <= PLAN_WIDTH; x += GRID_SIZE) {
-      ctx.strokeStyle = x % 50 === 0 ? "rgba(140,170,185,.30)" : "rgba(140,170,185,.09)";
+      ctx.strokeStyle = x % 50 === 0 ? "rgba(60,70,90,.20)" : "rgba(60,70,90,.07)";
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, PLAN_HEIGHT);
       ctx.stroke();
     }
     for (let y = 0; y <= PLAN_HEIGHT; y += GRID_SIZE) {
-      ctx.strokeStyle = y % 50 === 0 ? "rgba(140,170,185,.30)" : "rgba(140,170,185,.09)";
+      ctx.strokeStyle = y % 50 === 0 ? "rgba(60,70,90,.20)" : "rgba(60,70,90,.07)";
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(PLAN_WIDTH, y);
@@ -252,8 +252,8 @@ export default function FloorPlanEditor() {
 
     for (const z of plan?.zones ?? []) {
       const on = sel?.kind === "zone" && sel.id === z.id;
-      ctx.fillStyle = on ? "rgba(63,182,139,.30)" : "rgba(63,182,139,.14)";
-      ctx.strokeStyle = on ? "#e8f1f5" : "#3fb68b";
+      ctx.fillStyle = on ? "rgba(15,157,104,.28)" : "rgba(15,157,104,.13)";
+      ctx.strokeStyle = on ? "#1d2025" : "#0f9d68";
       ctx.lineWidth = on ? 3 : 2;
       ctx.fillRect(z.x, z.y, z.w, z.h);
       ctx.strokeRect(z.x, z.y, z.w, z.h);
@@ -261,7 +261,7 @@ export default function FloorPlanEditor() {
       ctx.beginPath();
       ctx.rect(z.x, z.y, z.w, z.h);
       ctx.clip();
-      ctx.fillStyle = "#dce6ea";
+      ctx.fillStyle = "#1d2025";
       ctx.font = "600 15px 'Segoe UI', sans-serif";
       ctx.fillText(z.name, z.x + 8, z.y + 22);
       ctx.restore();
@@ -272,15 +272,15 @@ export default function FloorPlanEditor() {
       ctx.save();
       ctx.translate(ex.x, ex.y);
       ctx.rotate(Math.PI / 4);
-      ctx.fillStyle = "#4cc3ff";
+      ctx.fillStyle = "#1d6fb8";
       ctx.fillRect(-8, -8, 16, 16);
       if (on) {
-        ctx.strokeStyle = "#ffffff";
+        ctx.strokeStyle = "#1d2025";
         ctx.lineWidth = 3;
         ctx.strokeRect(-8, -8, 16, 16);
       }
       ctx.restore();
-      ctx.fillStyle = "#4cc3ff";
+      ctx.fillStyle = "#1d6fb8";
       ctx.font = "600 12px 'Segoe UI', sans-serif";
       ctx.fillText("EXIT", ex.x + 14, ex.y + 4);
     }
@@ -288,7 +288,7 @@ export default function FloorPlanEditor() {
     if (drag?.mode === "draw") {
       const r = clampRect(drag.x0, drag.y0, drag.x1, drag.y1);
       ctx.setLineDash([6, 4]);
-      ctx.strokeStyle = "#e0a43a";
+      ctx.strokeStyle = "#e8590c";
       ctx.lineWidth = 2;
       ctx.strokeRect(r.x, r.y, r.w, r.h);
       ctx.setLineDash([]);

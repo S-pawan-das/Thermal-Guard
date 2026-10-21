@@ -13,8 +13,8 @@ import { layoutEquipment, type EquipItem } from "../../../shared/equipment";
  */
 const WALL_H = 46;
 const OUTER_H = 62;
-const STATUS_HEX: Record<ZoneStatus, number> = { normal: 0x3fb68b, warning: 0xe0a43a, critical: 0xff4a50 };
-const STATUS_CSS: Record<ZoneStatus, string> = { normal: "#3fb68b", warning: "#e0a43a", critical: "#ff6a6f" };
+const STATUS_HEX: Record<ZoneStatus, number> = { normal: 0x0f9d68, warning: 0xf2a900, critical: 0xd6264a };
+const STATUS_CSS: Record<ZoneStatus, string> = { normal: "#0f9d68", warning: "#b57f00", critical: "#d6264a" };
 const STATUS_TEXT: Record<ZoneStatus, string> = { normal: "OK", warning: "▲ WARNING", critical: "✖ CRITICAL" };
 
 export interface Probe { x: number; y: number; text: string }
@@ -38,9 +38,9 @@ function labelTexture(lines: { text: string; colour: string; size: number }[]): 
   const c = document.createElement("canvas");
   c.width = 512; c.height = 176;
   const g = c.getContext("2d")!;
-  g.fillStyle = "rgba(8,14,18,.82)";
+  g.fillStyle = "rgba(255,255,255,.94)";
   g.beginPath(); g.roundRect(4, 4, 504, 168, 18); g.fill();
-  g.strokeStyle = "rgba(255,255,255,.25)"; g.lineWidth = 3; g.stroke();
+  g.strokeStyle = "rgba(29,32,37,.16)"; g.lineWidth = 3; g.stroke();
   let y = 18;
   for (const l of lines) {
     g.font = `700 ${l.size}px 'Segoe UI', sans-serif`;
@@ -84,7 +84,7 @@ export class FactoryScene {
   constructor(private el: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    this.renderer.setClearColor(0x0b1115);
+    this.renderer.setClearColor(0xeceff2);
     el.appendChild(this.renderer.domElement);
     this.renderer.domElement.style.display = "block";
     this.renderer.domElement.style.width = "100%";
@@ -101,8 +101,8 @@ export class FactoryScene {
     this.controls.target.set(0, 0, 20);
     this.controls.update();
 
-    this.scene.background = new THREE.Color(0x0b1115);
-    this.scene.fog = new THREE.Fog(0x0b1115, 1600, 3200);
+    this.scene.background = new THREE.Color(0xeceff2);
+    this.scene.fog = new THREE.Fog(0xeceff2, 1800, 3600);
     this.scene.add(new THREE.AmbientLight(0xffffff, 1.15));
     const sun = new THREE.DirectionalLight(0xffffff, 1.5);
     sun.position.set(-420, 900, 520);
@@ -112,7 +112,7 @@ export class FactoryScene {
     this.scene.add(fill);
 
     // base slab under the whole plan, so the factory looks like a solid block
-    const slab = new THREE.Mesh(new THREE.BoxGeometry(PLAN_WIDTH + 24, 14, PLAN_HEIGHT + 24), new THREE.MeshLambertMaterial({ color: 0x1a252c }));
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(PLAN_WIDTH + 24, 14, PLAN_HEIGHT + 24), new THREE.MeshLambertMaterial({ color: 0xd9dee4 }));
     slab.position.y = -7.5;
     this.scene.add(slab);
 
@@ -164,8 +164,8 @@ export class FactoryScene {
     this.clearRoot();
     if (!plan) return;
 
-    const wallMat = new THREE.MeshLambertMaterial({ color: 0xdfe8ec, transparent: true, opacity: 0.3, depthWrite: false });
-    const edgeMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 });
+    const wallMat = new THREE.MeshLambertMaterial({ color: 0x9fb0bb, transparent: true, opacity: 0.22, depthWrite: false });
+    const edgeMat = new THREE.LineBasicMaterial({ color: 0x6b7783, transparent: true, opacity: 0.75 });
     const box = (w: number, h: number, d: number, mat: THREE.Material, at: THREE.Vector3, edges = true) => {
       const geo = new THREE.BoxGeometry(w, h, d);
       const m = new THREE.Mesh(geo, mat);
@@ -176,7 +176,7 @@ export class FactoryScene {
     };
 
     // outer walls
-    const outer = new THREE.MeshLambertMaterial({ color: 0xcfd9de, transparent: true, opacity: 0.16, depthWrite: false });
+    const outer = new THREE.MeshLambertMaterial({ color: 0xaab7c0, transparent: true, opacity: 0.14, depthWrite: false });
     const T = 6;
     box(PLAN_WIDTH + T, OUTER_H, T, outer, new THREE.Vector3(0, OUTER_H / 2, -PLAN_HEIGHT / 2));
     box(PLAN_WIDTH + T, OUTER_H, T, outer, new THREE.Vector3(0, OUTER_H / 2, PLAN_HEIGHT / 2));
@@ -199,7 +199,7 @@ export class FactoryScene {
       layoutEquipment(z).forEach((it) => this.addEquipment(it));
 
       // label + status beacon
-      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture([{ text: z.name, colour: "#f2f7f9", size: 44 }]), depthTest: false, transparent: true }));
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture([{ text: z.name, colour: "#1d2025", size: 44 }]), depthTest: false, transparent: true }));
       sprite.scale.set(122, 42, 1);
       sprite.position.set(c.x, WALL_H + 30, c.z);
       sprite.renderOrder = 10;
@@ -211,7 +211,7 @@ export class FactoryScene {
     }
 
     for (const ex of plan.exits) {
-      const m = new THREE.Mesh(new THREE.OctahedronGeometry(9), new THREE.MeshBasicMaterial({ color: 0x4cc3ff }));
+      const m = new THREE.Mesh(new THREE.OctahedronGeometry(9), new THREE.MeshBasicMaterial({ color: 0x1d6fb8 }));
       const p = toScene(ex.x, ex.y);
       m.position.set(p.x, 14, p.z);
       this.root.add(m);
@@ -311,11 +311,11 @@ export class FactoryScene {
       const lz = live.get(id);
       const status = lz?.status ?? "normal";
       (zr.beacon.material as THREE.MeshBasicMaterial).color.setHex(STATUS_HEX[status]);
-      const lines = [{ text: zr.zone.name, colour: "#f2f7f9", size: 42 }];
-      if (lz) lines.push({ text: `${lz.temperatureC.toFixed(1)} °C   max ${lz.maxCellC.toFixed(1)}`, colour: "#d3e0e5", size: 34 });
+      const lines = [{ text: zr.zone.name, colour: "#1d2025", size: 42 }];
+      if (lz) lines.push({ text: `${lz.temperatureC.toFixed(1)} °C   max ${lz.maxCellC.toFixed(1)}`, colour: "#5b6470", size: 34 });
       if (lz && status !== "normal") lines.push({ text: STATUS_TEXT[status], colour: STATUS_CSS[status], size: 34 });
-      else if (lz?.ai?.alert) lines.push({ text: "⚠ AI EARLY WARNING", colour: "#e0a43a", size: 34 });
-      else if (failed.has(id)) lines.push({ text: "❄ COOLER FAILED", colour: "#ffffff", size: 34 });
+      else if (lz?.ai?.alert) lines.push({ text: "⚠ AI EARLY WARNING", colour: "#b57f00", size: 34 });
+      else if (failed.has(id)) lines.push({ text: "❄ COOLER FAILED", colour: "#1d6fb8", size: 34 });
       const key = lines.map((l) => l.text).join("|") + (failed.has(id) ? "f" : "");
       if (key !== zr.text) {
         zr.text = key;

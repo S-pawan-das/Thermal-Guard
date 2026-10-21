@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { SimStatus, Zone } from "../../../shared/types";
+import Icon from "./icons";
 
 type Note = { kind: "ok" | "error"; text: string } | null;
 const parseTemp = (t: string) => (/^-?\d+(\.\d+)?$/.test(t.trim()) ? Number(t.trim()) : NaN);
@@ -42,21 +43,28 @@ export default function SimControls({ zones, sim }: { zones: Zone[]; sim?: SimSt
   }
 
   if (zones.length === 0) return <p className="empty">Create at least one zone in the Floor plan tab to use the simulator controls.</p>;
+  // Fires with a zone are user incidents; fires without one are the scenario's machine heat sources.
+  const zoneFires = sim?.fires.filter((f) => f.zoneId) ?? [];
+  const machines = (sim?.fires.length ?? 0) - zoneFires.length;
+  const issues = [
+    ...zoneFires.map((f) => `Fire in ${nameOf(f.zoneId)}`),
+    ...(machines > 0 ? [`${machines} machine heat source${machines > 1 ? "s" : ""} running`] : []),
+    ...(sim?.failedCoolers.map((id) => `Cooler failed in ${nameOf(id)}`) ?? []),
+  ];
   return (
     <section className="simbox">
       <div className="simstatus" role="status">
-        <p>
-          <b>Scenario:</b> {sim?.scenario ?? "—"} · <b>{sim?.paused ? "⏸ PAUSED" : "▶ Running"}</b> · step {sim?.step ?? 0}
-        </p>
-        <p>
-          {sim?.baseline ? "Baseline: no fire and no failed cooler." : ""}
-          {sim?.fires.map((f) => `Fire in ${nameOf(f.zoneId)}. `)}
-          {sim?.failedCoolers.map((id) => `Cooler failed in ${nameOf(id)}. `)}
-        </p>
+        <div className="row">
+          <span className="tag">{sim?.scenario ?? "—"}</span>
+          <span className={`tag ${sim?.paused ? "warm" : "good"}`}>{sim?.paused ? "⏸ Paused" : "▶ Running"}</span>
+          <span className="tag">step {sim?.step ?? 0}</span>
+          {sim?.baseline && <span className="tag good">Baseline: no fire, no failed cooler</span>}
+          {issues.map((t, i) => <span key={i} className={`tag ${t.includes("machine") ? "warm" : "bad"}`}>{t}</span>)}
+        </div>
       </div>
 
-      <label>
-        Zone
+      <label className="pick">
+        Zone to affect
         <select value={zone.id} onChange={(e) => setZoneId(e.target.value)}>
           {zones.map((z) => (
             <option key={z.id} value={z.id}>{z.name}</option>
@@ -64,25 +72,43 @@ export default function SimControls({ zones, sim }: { zones: Zone[]; sim?: SimSt
         </select>
       </label>
 
-      <div className="simrow">
-        <button className="btn danger" disabled={busy} onClick={() => call("/api/sim/fire", { zoneId: zone.id })}>Start fire in zone</button>
-        <span className="hint">Heats the middle of the zone toward 300 °C.</span>
+      <div className="act">
+        <span className="ai-ico hot"><Icon name="flame" /></span>
+        <h3>Start a fire</h3>
+        <p>Heats the middle of the zone toward 300 °C.</p>
+        <div className="ctl"><button className="btn danger" disabled={busy} onClick={() => call("/api/sim/fire", { zoneId: zone.id })}>Start fire</button></div>
       </div>
-      <div className="simrow">
-        <input aria-label="Failure temperature (optional)" placeholder="failure °C (optional)" inputMode="decimal" value={failTemp} onChange={(e) => setFailTemp(e.target.value)} />
-        <button className="btn danger" disabled={busy || zone.type !== "cold-storage"} onClick={failCooler}>Fail cooler</button>
-        <span className="hint">{zone.type === "cold-storage" ? "Room drifts toward ambient (or the failure °C)." : "Only cold-storage zones have a cooler."}</span>
+
+      <div className="act">
+        <span className="ai-ico cold"><Icon name="snowflake" /></span>
+        <h3>Fail the cooler</h3>
+        <p>{zone.type === "cold-storage" ? "The room drifts toward ambient (or the failure °C)." : "Only cold-storage zones have a cooler."}</p>
+        <div className="ctl">
+          <input aria-label="Failure temperature (optional)" placeholder="failure °C" inputMode="decimal" value={failTemp} onChange={(e) => setFailTemp(e.target.value)} />
+          <button className="btn danger" disabled={busy || zone.type !== "cold-storage"} onClick={failCooler}>Fail cooler</button>
+        </div>
       </div>
-      <div className="simrow">
-        <input aria-label="Temperature in °C" placeholder="°C" inputMode="decimal" value={temp} onChange={(e) => setTemp(e.target.value)} />
-        <button className="btn" disabled={busy} onClick={setTemperature}>Set zone temperature</button>
-        <span className="hint">One-time demo override of every cell the zone covers.</span>
+
+      <div className="act">
+        <span className="ai-ico"><Icon name="thermo" /></span>
+        <h3>Set zone temperature</h3>
+        <p>One-time override of every cell the zone covers; the simulation continues from there.</p>
+        <div className="ctl">
+          <input aria-label="Temperature in °C" placeholder="°C" inputMode="decimal" value={temp} onChange={(e) => setTemp(e.target.value)} />
+          <button className="btn" disabled={busy} onClick={setTemperature}>Set</button>
+        </div>
       </div>
-      <div className="simrow">
-        <button className="btn" disabled={busy} onClick={() => call(sim?.paused ? "/api/sim/resume" : "/api/sim/pause")}>{sim?.paused ? "Resume" : "Pause"}</button>
-        <button className="btn" disabled={busy} onClick={() => call("/api/sim/reset")}>Reset scenario</button>
-        <span className="hint">Reset removes fires and failures and restores the baseline. Alert history is kept.</span>
+
+      <div className="act">
+        <span className="ai-ico"><Icon name={sim?.paused ? "play" : "pause"} /></span>
+        <h3>Simulation</h3>
+        <p>Reset removes fires and failures and restores the baseline. Alert history is kept.</p>
+        <div className="ctl">
+          <button className="btn" disabled={busy} onClick={() => call(sim?.paused ? "/api/sim/resume" : "/api/sim/pause")}>{sim?.paused ? "Resume" : "Pause"}</button>
+          <button className="btn" disabled={busy} onClick={() => call("/api/sim/reset")}><Icon name="reset" size={16} /> Reset</button>
+        </div>
       </div>
+
       {note && <p className={note.kind === "ok" ? "field-ok" : "field-error"} role={note.kind === "ok" ? "status" : "alert"}>{note.kind === "ok" ? "✔ " : "✖ "}{note.text}</p>}
     </section>
   );
