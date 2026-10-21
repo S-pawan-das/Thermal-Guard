@@ -31,6 +31,16 @@ export default function ZoneCard({ zone }: { zone: Zone }) {
       </p>
       <p className="ztype">Coldest cell {zone.minCellC} °C · hottest cell {zone.maxCellC} °C</p>
       <p className="ztype">Warning within {warnMarginC} °C of a limit</p>
+      {zone.ai && (
+        <div className={`ai ${zone.ai.alert ? "on" : ""}`} role="status">
+          <div className="ai-head">
+            <span>AI forecast</span>
+            <b>{zone.ai.alert ? (status === "critical" ? "✖ OUT OF RANGE" : "⚠ EARLY WARNING") : "Stable"}</b>
+          </div>
+          <div className="ai-bar" aria-hidden="true"><div style={{ width: `${Math.round(zone.ai.risk * 100)}%` }} /></div>
+          <small>{Math.round(zone.ai.risk * 100)}% risk of leaving the limits within {zone.ai.horizon} steps</small>
+        </div>
+      )}
     </article>
   );
 }

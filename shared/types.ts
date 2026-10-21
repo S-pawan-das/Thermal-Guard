@@ -22,6 +22,14 @@ export interface Zone extends ZoneLimits {
   maxCellC: number; // hottest intersecting cell: high-temperature risk
   timestamp: string; // ISO 8601
   status: ZoneStatus;
+  ai?: ZoneForecast; // early-warning model output (absent until the server has enough history)
+}
+
+// Output of the trained early-warning model (shared/forecast.ts) for one zone.
+export interface ZoneForecast {
+  risk: number; // 0..1: chance the zone goes out of range within the next `horizon` simulation steps
+  alert: boolean; // the model's alarm is on (risk stayed above its tuned threshold, or the zone is already out of range)
+  horizon: number; // look-ahead in simulation steps
 }
 
 // What the simulator is doing right now (server-authoritative).
@@ -34,11 +42,20 @@ export interface SimStatus {
   baseline: boolean; // true when no fire and no failed cooler is active
 }
 
+// The whole thermal grid, row by row (index = row * cols + col), °C rounded to 0.1.
+// Same geometry as the engine: SIM_COLS x SIM_ROWS cells over the 1000 x 600 plan.
+export interface GridSnapshot {
+  cols: number;
+  rows: number;
+  values: number[];
+}
+
 export interface StateMessage {
   simulated: true;
   timestamp: string; // ISO 8601
   zones: Zone[];
   sim?: SimStatus;
+  grid?: GridSnapshot; // drives the Heatmap tab
 }
 
 // ---- Alerts (server-authoritative; broadcast on the "alerts" Socket.IO event) ----

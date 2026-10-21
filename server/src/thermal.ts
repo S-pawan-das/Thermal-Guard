@@ -15,7 +15,7 @@ import {
  *      Stability: the weight left on T itself is 1 - diffusion*SUM(c) - ambientRate >= 1 - 4*0.2 - 0.2 = 0
  *      because diffusion <= 0.2 and ambientRate <= 0.2 are enforced (the textbook limit is diffusion <= 0.25).
  *      Flux between two cells is symmetric, so diffusion alone conserves heat; only ambient/sources/coolers change it.
- *   2. Coolers (cold-storage zones): T += strength * (setpoint - T) on cells fully inside the zone.
+ *   2. Coolers (cold-storage zones): T += strength * (setpoint - T) on the zone's own cells (cell centre inside the zone).
  *      A failed cooler stops, and its cells instead move toward failureTempC (default: ambientC) at failureRate.
  *   3. Heat sources: T += strength * (targetC - T) on one cell while active. targetC is a cap: a source can
  *      never push a cell above it.
@@ -96,8 +96,8 @@ export class ThermalSim {
   private cR = new Float64Array(N); // conductance between cell i and i+1
   private cD = new Float64Array(N); // conductance between cell i and i+cols
   private zones: PlanZone[] = [];
-  private cellsOf = new Map<string, number[]>(); // all intersecting cells (statistics)
-  private insideOf = new Map<string, number[]>(); // cells fully inside (cooling)
+  private cellsOf = new Map<string, number[]>(); // the zone's own cells (statistics)
+  private insideOf = new Map<string, number[]>(); // the zone's own cells (cooling)
   private coolers = new Map<string, Cooler>();
   private failed = new Map<string, { failureTempC?: number }>();
   private extraSources: HeatSource[] = [];
@@ -126,17 +126,19 @@ export class ThermalSim {
     this.insideOf.clear();
     zones.forEach((z, zi) => {
       const { c0, c1, r0, r1 } = zoneSimCells(z);
-      const all: number[] = [], inside: number[] = [], own: number[] = [];
+      const all: number[] = [], own: number[] = [];
       for (let r = r0; r <= r1; r++)
         for (let c = c0; c <= c1; c++) {
           const i = r * SIM_COLS + c, x0 = c * SIM_CELL_W, y0 = r * SIM_CELL_H;
           all.push(i);
-          if (x0 >= z.x && x0 + SIM_CELL_W <= z.x + z.w && y0 >= z.y && y0 + SIM_CELL_H <= z.y + z.h) inside.push(i);
           const cx = x0 + SIM_CELL_W / 2, cy = y0 + SIM_CELL_H / 2;
           if (cx >= z.x && cx < z.x + z.w && cy >= z.y && cy < z.y + z.h) { owner[i] = zi; own.push(i); }
         }
-      this.cellsOf.set(z.id, all);
-      this.insideOf.set(z.id, inside.length ? inside : own.length ? own : all);
+      // A zone is measured and cooled on the cells whose CENTRE is inside it. Cells that merely overlap its edge belong
+      // to the neighbour / open floor (walls are drawn between owners), so counting them made a cold room read warm
+      // from the very first second whenever its edges are not on the 25 x 24 cell grid. Tiny zones fall back to every touched cell.
+      this.cellsOf.set(z.id, own.length ? own : all);
+      this.insideOf.set(z.id, own.length ? own : all);
     });
     const wall = this.scenario.params.wallConductance;
     for (let r = 0; r < SIM_ROWS; r++)
@@ -268,7 +270,7 @@ export class ThermalSim {
   getCell(col: number, row: number): number { return this.T[row * SIM_COLS + col]; }
   getGrid(): number[] { return Array.from(this.T); }
 
-  /** Per zone: coldest cell (cold risk), hottest cell (heat risk) and average (display), over all intersecting cells. */
+  /** Per zone: coldest cell (cold risk), hottest cell (heat risk) and average (display), over the zone's own cells. */
   zoneStats(): { id: string; minC: number; maxC: number; avgC: number }[] {
     return this.zones.map((z) => {
       const cells = this.cellsOf.get(z.id) ?? [];

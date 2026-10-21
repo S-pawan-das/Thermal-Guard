@@ -78,3 +78,20 @@ Alerts are kept in `server/data/alerts.json` (git-ignored; last 500). Alerts sti
 Responses are `{ok:true,message}` or `{error}` with HTTP 400. Socket.IO: `state` (now also carries `sim`: paused, step, scenario, fires, failedCoolers, baseline) and the new `alerts` event (`{alerts: AlertRecord[]}`, sent on connect and whenever an alert changes).
 Sound is off until you click "Enable alert sound" (browsers block autoplay); everything works without it.
 Note: `POST /api/sim/cooling-failure` now rejects unknown zone ids (it used to accept anything).
+
+## Milestone 6 — Factory heatmap
+New **Heatmap** tab: the live 40 × 25 thermal grid drawn as a smooth colour field over the floor plan (blue = cool, green = in range, red = hot).
+- The server now sends the whole grid with every `state` message (`grid: {cols, rows, values}`, °C rounded to 0.1; about 5 KB per update).
+- **Scale:** "Relative to zone limits" colours each cell by where it sits between its own zone's min and max limit (0.15 = min limit, 0.85 = max limit, saturated beyond), so a cold room and a paint booth both read green when in range. "Absolute °C" uses one scale for the whole floor. Colour logic: `shared/heat.ts` (tested in `server/test/heat.check.ts`).
+- Zone outlines take the status colour (green / amber / red) and carry a text label with average and hottest-cell temperature, so status never depends on colour alone. Fires and failed coolers are marked.
+- **3D model** (default, three.js; `client/src/factory3d/FactoryScene.ts`): a real 3D factory you can orbit (drag), zoom (scroll) and pan (right-drag). Walls with doorways, conveyors that move, machines, ovens and tanks, storage racks, pallets and desks are drawn per zone from its name/type (`shared/equipment.ts`; visual only, no thermal effect). The floor is the live heat field; machines glow when the floor under them is hot; each zone has a floating label with temperature and status plus a beacon; fires show as flames. Hover the floor for a cell's temperature. **2D map** is the flat version; it is also the fallback if the browser has no WebGL.
+- **Load factory demo** replaces the plan with the Factory template and starts a "running factory" scenario: ten machines (assembly line, paint-booth ovens, heat-sealers, dock equipment) that keep radiating heat. They use the existing heat-source engine (`client/src/demo.ts`). **Remove machines** returns to the plain ambient scenario.
+
+Still a teaching/demo model: heat spreads by diffusion, with no airflow, ventilation or HVAC, and the machine positions are fixed.
+
+## Milestone 7 — AI early warning (trained model)
+A small neural network, trained from scratch on simulated incidents, forecasts for every zone whether it will leave its limits within the next 30 steps. Details, commands and honest test results: **`ml/README.md`** and `ml/RESULTS.md`.
+- The server feeds the model one reading per zone per simulation step (even at high demo speed) and adds `ai: {risk, alert, horizon}` to each zone in the `state` message. Zone cards show an "AI forecast" bar with a text status (Stable / EARLY WARNING / OUT OF RANGE); the 3D labels show "AI EARLY WARNING".
+- Reset, a new scenario, a new floor plan, or edited limits clear the model's history, so it never reasons from stale readings. The model stays quiet for the first 12 steps of history.
+- Retrain with `npm run ml:train`, re-test with `npm run ml:eval`.
+- **Bug fix in the simulator:** a zone is now measured (and a cold room cooled) on the grid cells whose centre lies inside it. Before, cells merely overlapping its edge counted, so any cold-storage zone whose edges were not on the 25 × 24 cell grid read about room temperature at its edge and showed "critical" from the first second.

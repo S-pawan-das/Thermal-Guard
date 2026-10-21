@@ -3,7 +3,9 @@ import http from "http";
 import express from "express";
 import cors from "cors";
 import { Server } from "socket.io";
-import type { AlertsMessage, StateMessage } from "../../shared/types";
+import type { AlertsMessage, StateMessage, ZoneForecast } from "../../shared/types";
+import { Forecaster } from "../../shared/forecast";
+import { FORECAST_MODEL } from "../../shared/forecastModel";
 import { validateLimits, validatePlan } from "../../shared/floorplan";
 import { getState } from "./simulator";
 import { ThermalSim, validateFailure, validateFire, validateScenario, validateSetTemperature, validateSource } from "./thermal";
@@ -27,11 +29,25 @@ const envInt = (v: string | undefined, def: number, lo: number, hi: number) => {
 const INTERVAL_MS = envInt(process.env.SIM_INTERVAL_MS, 1000, 100, 10000); // real time between updates
 const STEPS_PER_TICK = envInt(process.env.SIM_STEPS_PER_TICK, 1, 1, 50); // simulation steps per update (demo speed)
 const sim = new ThermalSim();
+// ---- early-warning model: sees ONE reading per zone per simulation step, exactly like in training (see ml/) ----
+const forecaster = new Forecaster(FORECAST_MODEL);
+let forecasts = new Map<string, ZoneForecast>();
+const round1 = (v: number) => Math.round(v * 10) / 10;
+function observeForecasts() {
+  const limits = new Map(sim.getZones().map((z) => [z.id, z]));
+  const next = new Map<string, ZoneForecast>();
+  for (const s of sim.zoneStats()) {
+    const z = limits.get(s.id);
+    if (z) next.set(s.id, forecaster.observe(s.id, { avg: round1(s.avgC), min: round1(s.minC), max: round1(s.maxC) }, z));
+  }
+  forecasts = next;
+}
+const resetForecasts = () => { forecaster.reset(); forecasts = new Map(); };
 const syncZones = () => {
   const plan = peekPlan();
-  if (plan) sim.setZones(plan.zones);
+  if (plan) { sim.setZones(plan.zones); resetForecasts(); }
 };
-const current = (): StateMessage => getState(sim);
+const current = (): StateMessage => getState(sim, new Date(), forecasts);
 
 // ---- alerts: evaluated here, on the server, from the same readings the dashboard shows ----
 const envNum = (v: string | undefined, def: number, lo: number, hi: number) => {
@@ -64,7 +80,7 @@ function stopLoop() {
 function startLoop() {
   stopLoop(); // never more than one timer
   timer = setInterval(() => {
-    sim.tick(STEPS_PER_TICK);
+    for (let k = 0; k < STEPS_PER_TICK && !sim.paused; k++) { sim.tick(1); observeForecasts(); } // one model observation per step, even at high demo speed
     pushState();
   }, INTERVAL_MS);
 }
@@ -132,6 +148,7 @@ app.put("/api/sim/scenario", express.json({ limit: "100kb" }), (req, res) => {
   const r = validateScenario(req.body);
   if (!r.ok) return void res.status(400).json({ error: r.error });
   sim.setScenario(r.value);
+  resetForecasts();
   if (alerts.resolveAll("scenario reset").length) announceAlerts();
   pushState();
   res.json(sim.getScenario());
@@ -140,6 +157,7 @@ app.put("/api/sim/scenario", express.json({ limit: "100kb" }), (req, res) => {
 // Alert HISTORY is kept (active alerts are closed as "scenario reset"); use DELETE /api/alerts to clear history.
 app.post("/api/sim/reset", (_req, res) => {
   sim.reset();
+  resetForecasts();
   if (alerts.resolveAll("scenario reset").length) announceAlerts();
   pushState();
   res.json({ ok: true, message: "Simulation reset to baseline. Alert history was kept." });

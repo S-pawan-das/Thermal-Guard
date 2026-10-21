@@ -6,9 +6,10 @@ import FloorPlanEditor from "./components/FloorPlanEditor";
 import AlertBanner from "./components/AlertBanner";
 import AlertFeed from "./components/AlertFeed";
 import SimControls from "./components/SimControls";
+import HeatmapView from "./components/HeatmapView";
 
 type Connection = "connecting" | "connected" | "disconnected";
-type View = "dashboard" | "plan" | "sim";
+type View = "dashboard" | "heat" | "plan" | "sim";
 const CONN_LABEL: Record<Connection, string> = {
   connecting: "Connecting",
   connected: "Connected",
@@ -89,13 +90,16 @@ export default function App() {
 
       <nav className="tabs">
         <button className={view === "dashboard" ? "on" : ""} onClick={() => setView("dashboard")}>Dashboard</button>
+        <button className={view === "heat" ? "on" : ""} onClick={() => setView("heat")}>Heatmap</button>
         <button className={view === "plan" ? "on" : ""} onClick={() => setView("plan")}>Floor plan</button>
         <button className={view === "sim" ? "on" : ""} onClick={() => setView("sim")}>Simulator</button>
       </nav>
 
       <AlertBanner alerts={alerts} />
 
-      {view === "plan" ? (
+      {view === "heat" ? (
+        <HeatmapView state={state} />
+      ) : view === "plan" ? (
         <FloorPlanEditor />
       ) : view === "sim" ? (
         <SimControls zones={state?.zones ?? []} sim={state?.sim} />

@@ -88,3 +88,31 @@ canvas { display: block; width: 100%; aspect-ratio: 1000 / 600; border: 1px soli
 .simbox select { display: block; margin-top: 4px; min-width: 220px; }
 .simrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .simrow input { width: 150px; }
+
+/* ---- heatmap view ---- */
+.heatview .inline { display: inline-flex; align-items: center; gap: 8px; font-size: .85rem; color: var(--dim); }
+.heatview select { padding: 5px 8px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+.heatview input[type=range] { width: 110px; }
+.heatstage { transition: padding .25s; }
+.heatwrap { position: relative; transform-origin: 50% 60%; transition: transform .25s; box-shadow: 0 18px 40px rgba(0,0,0,.45); border-radius: 8px; }
+.probe { position: absolute; pointer-events: none; background: rgba(8,14,18,.92); border: 1px solid var(--line); padding: 4px 8px; border-radius: 6px; font-size: .8rem; white-space: nowrap; z-index: 2; }
+.legend { max-width: 520px; margin-top: 14px; }
+.legend .bar { height: 12px; border-radius: 6px; border: 1px solid var(--line); }
+.legend .ticks { display: flex; justify-content: space-between; color: var(--dim); font-size: .8rem; margin-top: 4px; }
+.heat-empty { display: grid; gap: 12px; justify-items: start; }
+.stage3d { position: relative; width: 100%; aspect-ratio: 16 / 9; min-height: 380px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #0b1115; touch-action: none; cursor: grab; }
+.stage3d:active { cursor: grabbing; }
+.seg { display: inline-flex; gap: 0; }
+.seg .btn:first-child { border-radius: 6px 0 0 6px; } .seg .btn:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
+
+/* ---- AI forecast on zone cards ---- */
+.ai { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: .85rem; }
+.ai-head { display: flex; justify-content: space-between; color: var(--dim); }
+.ai-head b { color: var(--ok); letter-spacing: .03em; }
+.ai.on .ai-head b { color: var(--warn); }
+.ai-bar { height: 6px; background: var(--line); border-radius: 3px; margin: 6px 0 4px; overflow: hidden; }
+.ai-bar div { height: 100%; background: var(--ok); transition: width .6s linear; }
+.ai.on .ai-bar div { background: var(--warn); }
+.ai small { color: var(--dim); }
+.card.critical .ai.on .ai-head b { color: #ff6a6f; }
+.card.critical .ai.on .ai-bar div { background: var(--bad); }
