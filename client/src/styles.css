@@ -239,3 +239,46 @@ canvas { display: block; width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 .flip { transform: scaleX(-1); }
+
+/* ---- prediction timeline (digital twin) ---- */
+.timeline { display: flex; align-items: center; gap: 14px; background: var(--card); border-radius: var(--r-lg); box-shadow: var(--shadow-sm); padding: 12px 18px 12px 12px; margin: 10px 0; }
+.timeline.on { outline: 2px solid var(--accent-2); }
+.tl-body { flex: 1; min-width: 0; }
+.tl-top { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: .85rem; }
+.tl-top span { color: var(--muted); }
+.timeline input[type=range] { width: 100%; accent-color: var(--accent); }
+.tl-ticks { display: flex; justify-content: space-between; font-size: .72rem; color: var(--muted); }
+.forecast-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+.chip-note { border: 0; font: inherit; font-size: .84rem; font-weight: 600; padding: 7px 14px; border-radius: 999px; background: var(--card); box-shadow: var(--shadow-sm); cursor: default; }
+button.chip-note { cursor: pointer; }
+.chip-note.good { color: #0b7a50; background: #e3f6ee; }
+.chip-note.warn { color: #8a5a00; background: #fff3d6; }
+.chip-note.bad { color: #a8132f; background: #fde3e8; }
+.pred-badge { position: absolute; top: 12px; left: 12px; z-index: 2; background: rgba(17,18,20,.82); color: #fff; font-weight: 700; font-size: .8rem; letter-spacing: .04em; padding: 7px 14px; border-radius: 999px; pointer-events: none; }
+@media (max-width: 600px) { .timeline { padding: 10px; gap: 8px; } .tl-top span { display: none; } }
+.alert-item .explain { grid-column: 2; margin: 4px 0; padding-left: 18px; color: var(--ink-2); font-size: .88rem; }
+.alert-item .advice { grid-column: 2; font-weight: 700; font-size: .88rem; color: var(--ink); }
+.alert-item .why, .alert-item small, .alert-item .top { grid-column: 2; }
+
+/* ---- Insights ---- */
+.insights { display: grid; gap: 16px; }
+.ins-card { padding: 20px; }
+.ins-card h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; font-size: 1.15rem; }
+.ins-card h2 .sub { font-size: .78rem; color: var(--muted); font-weight: 600; }
+.ins-card h3 { margin: 16px 0 6px; font-size: .95rem; }
+.mach-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-top: 12px; }
+.mach { background: var(--card-2); border-radius: var(--r-md); padding: 14px; border: 2px solid transparent; }
+.mach.warn { border-color: #f0c35a; } .mach.bad { border-color: #e8788c; } .mach.good { border-color: transparent; }
+.mach header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.mach small { color: var(--muted); }
+.mach-text { margin: 6px 0 2px; font-weight: 600; font-size: .88rem; }
+.mach-nums { margin: 2px 0 4px; color: var(--ink-2); font-size: .84rem; }
+.cycle-chart { width: 100%; height: auto; display: block; margin-top: 6px; }
+.act-list, .cause-list { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; }
+.act-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: var(--card-2); border-radius: var(--r-md); padding: 10px 14px; }
+.act-list p { margin: 2px 0 0; color: var(--muted); font-size: .85rem; }
+.why-summary { font-weight: 600; margin: 10px 0 0; }
+.cause-top { display: flex; justify-content: space-between; }
+.cause-bar { height: 8px; border-radius: 99px; background: var(--card-2); overflow: hidden; margin: 4px 0; }
+.cause-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+label.inline { display: inline-flex; align-items: center; gap: 8px; }

@@ -2,6 +2,10 @@ import { useState } from "react";
 import type { AlertRecord } from "../../../shared/types";
 import Icon from "./icons";
 
+const KIND: Record<string, string> = {
+  high: "High temperature", low: "Low temperature", spread: "Heat could spread",
+  underperform: "Machine under-performing", overshoot: "Machine running hot",
+};
 const time = (iso: string) => new Date(iso).toLocaleTimeString();
 
 export default function AlertFeed({ alerts, soundOn, onToggleSound }: { alerts: AlertRecord[]; soundOn: boolean; onToggleSound: () => void }) {
@@ -38,9 +42,13 @@ export default function AlertFeed({ alerts, soundOn, onToggleSound }: { alerts: 
               <div className="top">
                 <span className="sev">{a.severity === "critical" ? "⛔ CRITICAL" : "⚠ WARNING"}</span>
                 <b>{a.zoneName}</b>
-                <span className="kind">{a.kind === "high" ? "High temperature" : "Low temperature"}</span>
+                <span className="kind">{KIND[a.kind] ?? a.kind}</span>
               </div>
+              {a.title && <span className="why"><b>{a.title}</b></span>}
               <span className="why">{a.reason}</span>
+              {a.explain && a.explain.length > 0 && <ul className="explain">{a.explain.map((e, i) => <li key={i}>{e}</li>)}</ul>}
+              {a.advice && <span className="advice">➜ {a.advice}</span>}
+              {a.etaSteps != null && a.etaSteps > 0 && <small>Predicted limit breach in about {a.etaSteps} min</small>}
               <small>
                 {a.status === "active" ? "ACTIVE since " + time(a.startedAt) : `Resolved ${a.resolvedAt ? time(a.resolvedAt) : ""} (${a.resolution})`}
                 {" · "}worst {a.peakC} °C{a.occurrences > 1 ? ` · seen ${a.occurrences}×` : ""} · {a.id}

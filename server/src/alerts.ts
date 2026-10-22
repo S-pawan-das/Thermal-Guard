@@ -17,9 +17,32 @@ import type { AlertKind, AlertRecord, AlertSeverity, Zone } from "../../shared/t
  */
 export interface AlertConfig { hysteresisC: number; cooldownMs: number; maxHistory: number }
 export const DEFAULT_ALERT_CONFIG: AlertConfig = { hysteresisC: 0.3, cooldownMs: 60_000, maxHistory: 500 };
-export type AlertChange = { type: "created" | "reopened" | "resolved"; alert: AlertRecord };
+export type AlertChange = { type: "created" | "reopened" | "resolved" | "updated"; alert: AlertRecord };
+
+/**
+ * A condition computed outside the limit checks (spread to connected rooms, machine-pattern deviations). The engine turns the
+ * current set of conditions into alerts: new -> created, severity change -> escalated/recovered, gone for ABSENT_SYNCS in a row
+ * -> resolved, text changes -> quietly updated (pushed at most every UPDATE_PUSH_MS).
+ */
+export interface Condition {
+  zoneId: string;
+  zoneName: string;
+  kind: "spread" | "underperform" | "overshoot";
+  subject: string; // with zoneId and kind this identifies the condition: machine id, source zone id, ...
+  severity: AlertSeverity;
+  reason: string;
+  title: string;
+  explain: string[];
+  advice: string;
+  etaSteps?: number | null;
+  readingC: number;
+  limitC: number;
+}
+const ABSENT_SYNCS = 3;
+const UPDATE_PUSH_MS = 5000;
 type Level = 0 | 1 | 2;
 
+const KINDS: AlertKind[] = ["high", "low", "spread", "underperform", "overshoot"];
 const fin = (...v: unknown[]) => v.every((x) => typeof x === "number" && Number.isFinite(x));
 const r1 = (v: number) => Math.round(v * 10) / 10;
 
@@ -56,16 +79,21 @@ export class AlertEngine {
     for (const h of history) {
       const a = h as Partial<AlertRecord> | null;
       if (!a || typeof a !== "object" || typeof a.id !== "string" || typeof a.zoneId !== "string" || typeof a.zoneName !== "string") continue;
-      if ((a.kind !== "high" && a.kind !== "low") || (a.severity !== "warning" && a.severity !== "critical")) continue;
+      if (!KINDS.includes(a.kind as AlertKind) || (a.severity !== "warning" && a.severity !== "critical")) continue;
       if (!fin(a.readingC, a.peakC, a.limitC) || typeof a.startedAt !== "string" || typeof a.reason !== "string") continue;
       const wasActive = a.status === "active";
       this.alerts.push({
-        id: a.id, zoneId: a.zoneId, zoneName: a.zoneName, kind: a.kind, severity: a.severity, reason: a.reason.slice(0, 300),
+        id: a.id, zoneId: a.zoneId, zoneName: a.zoneName, kind: a.kind as AlertKind, severity: a.severity, reason: a.reason.slice(0, 300),
         readingC: a.readingC as number, peakC: a.peakC as number, limitC: a.limitC as number, startedAt: a.startedAt,
         status: "resolved", updatedAt: wasActive ? iso : typeof a.updatedAt === "string" ? a.updatedAt : a.startedAt,
         resolvedAt: wasActive ? iso : typeof a.resolvedAt === "string" ? a.resolvedAt : a.startedAt,
         resolution: wasActive ? "server restart" : a.resolution ?? "recovered",
         occurrences: Number.isInteger(a.occurrences) && (a.occurrences as number) > 0 ? (a.occurrences as number) : 1,
+        ...(typeof a.title === "string" ? { title: a.title.slice(0, 120) } : {}),
+        ...(Array.isArray(a.explain) ? { explain: a.explain.filter((x) => typeof x === "string").slice(0, 8).map((x) => x.slice(0, 300)) } : {}),
+        ...(typeof a.advice === "string" ? { advice: a.advice.slice(0, 300) } : {}),
+        ...(typeof a.subject === "string" ? { subject: a.subject.slice(0, 64) } : {}),
+        ...(typeof a.etaSteps === "number" && Number.isFinite(a.etaSteps) ? { etaSteps: a.etaSteps } : {}),
       });
       const n = Number(a.id.replace(/^A-/, ""));
       if (Number.isFinite(n)) this.seq = Math.max(this.seq, n);
@@ -88,11 +116,80 @@ export class AlertEngine {
     return out;
   }
 
+  /** Attach "what is the problem" detail (root causes, advice) to an alert, e.g. after the twin has analysed it. */
+  annotate(id: string, detail: Pick<AlertRecord, "explain" | "advice" | "title" | "etaSteps">): AlertRecord | undefined {
+    const a = this.alerts.find((x) => x.id === id);
+    if (a) Object.assign(a, detail);
+    return a;
+  }
+
+  /** Turn the current external conditions into alert changes (see Condition). */
+  sync(conds: Condition[]): AlertChange[] {
+    const out: AlertChange[] = [];
+    const nowMs = this.now();
+    const sameKey = (a: AlertRecord, c: Condition) => a.kind === c.kind && a.zoneId === c.zoneId && a.subject === c.subject;
+    const isExternal = (a: AlertRecord) => a.kind === "spread" || a.kind === "underperform" || a.kind === "overshoot";
+    const live = new Set<AlertRecord>();
+    for (const c of conds) {
+      const act = this.alerts.find((a) => a.status === "active" && sameKey(a, c));
+      if (act) {
+        live.add(act);
+        this.absent.delete(act.id);
+        if (act.severity !== c.severity) {
+          this.resolve(act, c.severity === "critical" ? "escalated" : "recovered", out);
+          live.add(this.openCondition(c, out));
+        } else {
+          const changed = act.reason !== c.reason || act.etaSteps !== (c.etaSteps ?? null);
+          Object.assign(act, { reason: c.reason, title: c.title, explain: c.explain, advice: c.advice, etaSteps: c.etaSteps ?? null, readingC: c.readingC, limitC: c.limitC });
+          if (c.readingC > act.peakC) act.peakC = c.readingC;
+          if (changed && nowMs - (this.lastPush.get(act.id) ?? 0) >= UPDATE_PUSH_MS) {
+            act.updatedAt = new Date(nowMs).toISOString();
+            this.lastPush.set(act.id, nowMs);
+            out.push({ type: "updated", alert: act });
+          }
+        }
+      } else live.add(this.openCondition(c, out));
+    }
+    for (const a of this.active()) {
+      if (!isExternal(a) || live.has(a)) continue;
+      const n = (this.absent.get(a.id) ?? 0) + 1;
+      if (n >= ABSENT_SYNCS) { this.absent.delete(a.id); this.resolve(a, "recovered", out); } else this.absent.set(a.id, n);
+    }
+    return out;
+  }
+  private absent = new Map<string, number>();
+  private lastPush = new Map<string, number>();
+
+  private openCondition(c: Condition, out: AlertChange[]): AlertRecord {
+    const nowMs = this.now(), iso = new Date(nowMs).toISOString();
+    const old = this.alerts.find((a) =>
+      a.status === "resolved" && a.kind === c.kind && a.zoneId === c.zoneId && a.subject === c.subject && a.severity === c.severity &&
+      (a.resolution === "recovered" || a.resolution === "escalated") && a.resolvedAt !== null && nowMs - Date.parse(a.resolvedAt) < this.cfg.cooldownMs);
+    const detail = { reason: c.reason, title: c.title, explain: c.explain, advice: c.advice, etaSteps: c.etaSteps ?? null, readingC: c.readingC, limitC: c.limitC, zoneName: c.zoneName };
+    if (old) {
+      Object.assign(old, detail, { status: "active", resolvedAt: null, resolution: null, updatedAt: iso, occurrences: old.occurrences + 1, peakC: c.readingC });
+      out.push({ type: "reopened", alert: old });
+      return old;
+    }
+    const a: AlertRecord = {
+      id: `A-${String(++this.seq).padStart(6, "0")}`, zoneId: c.zoneId, kind: c.kind, severity: c.severity, status: "active", subject: c.subject,
+      peakC: c.readingC, startedAt: iso, updatedAt: iso, resolvedAt: null, resolution: null, occurrences: 1, ...detail,
+    };
+    this.alerts.push(a);
+    while (this.alerts.length > this.cfg.maxHistory) {
+      const i = this.alerts.findIndex((x) => x.status === "resolved");
+      this.alerts.splice(i < 0 ? 0 : i, 1);
+    }
+    out.push({ type: "created", alert: a });
+    return a;
+  }
+
   /** Close every active alert (history is kept) and forget the per-zone state, e.g. after a scenario reset. */
   resolveAll(resolution: "scenario reset" | "zone removed"): AlertChange[] {
     const out: AlertChange[] = [];
     for (const a of this.active()) this.resolve(a, resolution, out);
     this.level.clear();
+    this.absent.clear();
     return out;
   }
 

@@ -1,7 +1,7 @@
-import type { PlanZone, SimStatus } from "../../shared/types";
+import type { PlanLink, PlanZone, SimStatus } from "../../shared/types";
 import {
   PLAN_WIDTH, PLAN_HEIGHT, SIM_COLS, SIM_ROWS, SIM_CELL_W, SIM_CELL_H, TEMP_MIN, TEMP_MAX,
-  clamp, planToSimCell, zoneSimCells,
+  clamp, planToSimCell, zoneOwnedCells, zoneCentreCell, LINK_CONDUCTANCE,
 } from "../../shared/floorplan";
 
 /**
@@ -20,6 +20,13 @@ import {
  *   3. Heat sources: T += strength * (targetC - T) on one cell while active. targetC is a cap: a source can
  *      never push a cell above it.
  *   4. Safety: non-finite values become ambientC; everything is clamped to [TEMP_MIN, TEMP_MAX].
+ *
+ * OPEN REGIONS: a zone painted cell by cell (PlanZone.cells) is an area of an open hall. It has no walls: heat flows
+ * across its edge as freely as inside it.
+ * LINKS: a pipe / duct / conveyor / door between two zones is an air exchange: per step, the end cell on each side relaxes
+ * toward the AVERAGE temperature of the zone at the other end (rate k per kind, see LINK_CONDUCTANCE), so a fire in one room
+ * warms a connected room. A closed link carries nothing.
+ * ACTUATORS: runtime "emergency cooling" or "ventilation" on a zone's cells (used by what-if actions and the Apply button).
  *
  * WALLS: not drawn explicitly. The edge between two cells whose CENTRES lie in different zones (or one in a zone
  * and one on open floor) conducts only wallConductance (default 0.02) of the normal amount. 1 = no walls,
@@ -49,6 +56,16 @@ export interface HeatSource {
   strength: number; // 0..1 per step
   startStep: number;
   endStep: number | null; // null = never ends
+  name?: string; // human label, e.g. "Conveyor motor 2"
+  machineId?: string; // stable id of the machine this run belongs to (cycle profiles are learned per machine); defaults to id
+  efficiency?: number; // 1 = normal. Scales how hard the machine heats (target rise above ambient and strength). <1 worn, >1 runaway
+}
+export interface Actuator {
+  id: string;
+  zoneId: string;
+  kind: "cooling" | "vent";
+  targetC: number; // cooling pulls toward this; ventilation pulls toward ambient
+  strength: number; // 0..1 per step
 }
 export interface CoolingFailure {
   zoneId: string; // a zone id, or "*" for every cooled zone
@@ -101,6 +118,12 @@ export class ThermalSim {
   private coolers = new Map<string, Cooler>();
   private failed = new Map<string, { failureTempC?: number }>();
   private extraSources: HeatSource[] = [];
+  private actuators: Actuator[] = [];
+  private links: PlanLink[] = [];
+  private closedLinks = new Set<string>();
+  private ports = new Map<string, [number, number]>(); // link id -> [cell in a, cell in b]
+  private open = new Uint8Array(N); // 1 where the cell belongs to an open (painted) region
+  private owner = new Int16Array(N).fill(-1); // zone index owning each cell
 
   constructor(scenario: Scenario = defaultScenario(), zones: PlanZone[] = []) {
     this.scenario = this.clean(scenario);
@@ -121,32 +144,29 @@ export class ThermalSim {
   /** Call whenever the saved floor plan changes. Temperatures are kept; geometry and coolers are rebuilt. */
   setZones(zones: PlanZone[]): void {
     this.zones = zones;
-    const owner = new Int16Array(N).fill(-1);
+    const owner = this.owner.fill(-1);
     this.cellsOf.clear();
     this.insideOf.clear();
+    this.open.fill(0);
     zones.forEach((z, zi) => {
-      const { c0, c1, r0, r1 } = zoneSimCells(z);
-      const all: number[] = [], own: number[] = [];
-      for (let r = r0; r <= r1; r++)
-        for (let c = c0; c <= c1; c++) {
-          const i = r * SIM_COLS + c, x0 = c * SIM_CELL_W, y0 = r * SIM_CELL_H;
-          all.push(i);
-          const cx = x0 + SIM_CELL_W / 2, cy = y0 + SIM_CELL_H / 2;
-          if (cx >= z.x && cx < z.x + z.w && cy >= z.y && cy < z.y + z.h) { owner[i] = zi; own.push(i); }
-        }
       // A zone is measured and cooled on the cells whose CENTRE is inside it. Cells that merely overlap its edge belong
       // to the neighbour / open floor (walls are drawn between owners), so counting them made a cold room read warm
       // from the very first second whenever its edges are not on the 25 x 24 cell grid. Tiny zones fall back to every touched cell.
-      this.cellsOf.set(z.id, own.length ? own : all);
-      this.insideOf.set(z.id, own.length ? own : all);
+      // A painted region owns exactly its cells and has no walls.
+      const own = zoneOwnedCells(z);
+      for (const i of own) { owner[i] = zi; if (z.cells) this.open[i] = 1; }
+      this.cellsOf.set(z.id, own);
+      this.insideOf.set(z.id, own);
     });
     const wall = this.scenario.params.wallConductance;
+    const conduct = (i: number, j: number) => (owner[i] === owner[j] || this.open[i] || this.open[j] ? 1 : wall);
     for (let r = 0; r < SIM_ROWS; r++)
       for (let c = 0; c < SIM_COLS; c++) {
         const i = r * SIM_COLS + c;
-        if (c < SIM_COLS - 1) this.cR[i] = owner[i] === owner[i + 1] ? 1 : wall;
-        if (r < SIM_ROWS - 1) this.cD[i] = owner[i] === owner[i + SIM_COLS] ? 1 : wall;
+        if (c < SIM_COLS - 1) this.cR[i] = conduct(i, i + 1);
+        if (r < SIM_ROWS - 1) this.cD[i] = conduct(i, i + SIM_COLS);
       }
+    this.buildPorts();
     // cooled zones: cold-storage zones get a cooler whose setpoint is the middle of their limits
     this.coolers.clear();
     for (const z of zones) if (z.type === "cold-storage") this.coolers.set(z.id, { setpointC: (z.minC + z.maxC) / 2 });
@@ -156,11 +176,51 @@ export class ThermalSim {
     if (this.step === 0) this.T.set(this.initial);
   }
 
+  // ---- links ----
+  setLinks(links: PlanLink[]): void {
+    this.links = links;
+    for (const id of [...this.closedLinks]) if (!links.some((l) => l.id === id)) this.closedLinks.delete(id);
+    this.buildPorts();
+  }
+  getLinks(): PlanLink[] { return this.links; }
+  isLinkClosed(id: string): boolean { return this.closedLinks.has(id); }
+  closedLinkIds(): string[] { return [...this.closedLinks]; }
+  /** Isolate a link (shut the valve / close the door) or reopen it. Returns false for an unknown id. */
+  setLinkClosed(id: string, closed: boolean): boolean {
+    if (!this.links.some((l) => l.id === id)) return false;
+    if (closed) this.closedLinks.add(id); else this.closedLinks.delete(id);
+    return true;
+  }
+  /** Each link exchanges heat through one cell on each side: the cell of each zone nearest to the other zone. */
+  private buildPorts(): void {
+    this.ports.clear();
+    const byId = new Map(this.zones.map((z) => [z.id, z]));
+    for (const l of this.links) {
+      const za = byId.get(l.a), zb = byId.get(l.b);
+      if (!za || !zb) continue;
+      const mid = (z: PlanZone) => ({ x: z.x + z.w / 2, y: z.y + z.h / 2 });
+      this.ports.set(l.id, [zoneCentreCell(za, mid(zb)), zoneCentreCell(zb, mid(za))]);
+    }
+  }
+
+  // ---- actuators (emergency cooling, ventilation) ----
+  addActuator(a: Actuator): void {
+    this.actuators = this.actuators.filter((x) => x.id !== a.id);
+    this.actuators.push(a);
+  }
+  getActuators(): Actuator[] { return this.actuators; }
+  clearActuators(): void { this.actuators = []; }
+  /** Bring a failed cooler back. */
+  repairCooler(zoneId: string): boolean { return this.failed.delete(zoneId); }
+  hasFailedCooler(zoneId: string): boolean { return this.failed.has(zoneId); }
+
   /** Replace the scenario and start again from step 0. */
   setScenario(s: Scenario): void {
     this.scenario = this.clean(s);
     this.extraSources = [];
     this.failed.clear();
+    this.actuators = [];
+    this.closedLinks.clear();
     this.step = 0;
     this.setZones(this.zones);
     this.T.set(this.initial);
@@ -172,6 +232,21 @@ export class ThermalSim {
     this.step = 0;
     this.failed.clear();
     this.extraSources = [];
+    this.actuators = [];
+    this.closedLinks.clear();
+  }
+
+  /** An independent copy of the whole state (temperatures, step, fires, failures, actuators, closed links) to run "what happens next". */
+  fork(): ThermalSim {
+    const f = new ThermalSim(this.scenario, this.zones);
+    f.setLinks(this.links);
+    f.T.set(this.T);
+    f.step = this.step;
+    for (const [id, v] of this.failed) f.failed.set(id, { ...v });
+    f.extraSources = this.extraSources.map((s) => ({ ...s }));
+    f.actuators = this.actuators.map((a) => ({ ...a }));
+    f.closedLinks = new Set(this.closedLinks);
+    return f;
   }
 
   addSource(s: HeatSource): void {
@@ -218,12 +293,50 @@ export class ThermalSim {
     return { paused: this.paused, step: this.step, scenario: this.scenario.name, fires, failedCoolers, baseline: fires.length === 0 && failedCoolers.length === 0 };
   }
 
+  /** Heat sources running right now, with the cell each one heats. */
+  activeSources(): (HeatSource & { cell: number; machineKey: string })[] {
+    return [...this.scenario.sources, ...this.extraSources]
+      .filter((s) => this.step >= s.startStep && (s.endStep === null || this.step < s.endStep))
+      .map((s) => ({ ...s, cell: this.sourceCell(s), machineKey: s.machineId ?? s.id }));
+  }
+  /** Every source of the scenario and runtime, active or not (for counterfactuals). */
+  allSources(): HeatSource[] { return [...this.scenario.sources, ...this.extraSources]; }
+  /** End a heat source now (a machine switched off / a fire put out). Returns false if no such source. */
+  stopSource(id: string): boolean {
+    for (const list of [this.extraSources, this.scenario.sources]) {
+      const s = list.find((x) => x.id === id);
+      if (s) {
+        // the scenario object is shared with forks; replace instead of mutating
+        if (list === this.scenario.sources) this.scenario = { ...this.scenario, sources: this.scenario.sources.map((x) => (x.id === id ? { ...x, endStep: this.step } : x)) };
+        else s.endStep = this.step;
+        return true;
+      }
+    }
+    return false;
+  }
+  /** Average of the cell and its 8 neighbours: what a temperature probe mounted on a machine would read. */
+  localTemp(cell: number): number {
+    const c = cell % SIM_COLS, r = Math.floor(cell / SIM_COLS);
+    let sum = 0, n = 0;
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      const cc = c + dc, rr = r + dr;
+      if (cc >= 0 && cc < SIM_COLS && rr >= 0 && rr < SIM_ROWS) { sum += this.T[rr * SIM_COLS + cc]; n++; }
+    }
+    return sum / n;
+  }
+  cellsOfZone(id: string): number[] { return this.cellsOf.get(id) ?? []; }
+  temperatureAt(cell: number): number { return this.T[cell]; }
+
+  /** The grid cell a heat source heats (public for the pattern monitor). */
+  cellOfSource(s: HeatSource): number { return this.sourceCell(s); }
+  /** Index of the zone that owns a cell in getZones(), or -1 for open floor. */
+  zoneIndexAt(cell: number): number { return this.owner[cell]; }
+
   private sourceCell(s: HeatSource): number {
     if (s.zoneId !== undefined) {
       const z = this.zones.find((q) => q.id === s.zoneId);
       if (!z) return -1;
-      const p = planToSimCell(z.x + z.w / 2, z.y + z.h / 2);
-      return p.row * SIM_COLS + p.col;
+      return zoneCentreCell(z);
     }
     const p = planToSimCell(finiteOr(s.x, 0), finiteOr(s.y, 0));
     return p.row * SIM_COLS + p.col;
@@ -249,6 +362,19 @@ export class ThermalSim {
     this.T = tmp;
     this.tmp = T;
     T = this.T;
+    // 1b. links: air exchange. The end cell on each side relaxes toward the average temperature of the zone at the other end,
+    //     like a pipe or duct pulling air from one room into the other. Each update is a convex blend, so nothing overshoots.
+    for (const l of this.links) {
+      if (this.closedLinks.has(l.id)) continue;
+      const p = this.ports.get(l.id), ca = this.cellsOf.get(l.a), cb = this.cellsOf.get(l.b);
+      if (!p || !ca?.length || !cb?.length) continue;
+      let sa = 0, sb = 0;
+      for (const i of ca) sa += T[i];
+      for (const i of cb) sb += T[i];
+      const k = LINK_CONDUCTANCE[l.kind], avgA = sa / ca.length, avgB = sb / cb.length;
+      T[p[1]] += k * (avgA - T[p[1]]);
+      T[p[0]] += k * (avgB - T[p[0]]);
+    }
     // 2. coolers and failed coolers
     for (const [id, cl] of this.coolers) {
       const cells = this.insideOf.get(id) ?? [];
@@ -256,11 +382,21 @@ export class ThermalSim {
       if (!f) for (const i of cells) T[i] += COOLER_STRENGTH * (cl.setpointC - T[i]);
       else { const target = clamp(finiteOr(f.failureTempC, amb), TEMP_MIN, TEMP_MAX); for (const i of cells) T[i] += failureRate * (target - T[i]); }
     }
-    // 3. heat sources
+    // 2b. actuators: emergency cooling and ventilation
+    for (const a of this.actuators) {
+      const cells = this.cellsOf.get(a.zoneId);
+      if (!cells) continue;
+      const target = a.kind === "vent" ? amb : a.targetC;
+      for (const i of cells) T[i] += clamp(a.strength, 0, 1) * (target - T[i]);
+    }
+    // 3. heat sources (efficiency scales the rise above ambient and the strength: a worn machine heats less, a runaway one more)
     for (const s of [...this.scenario.sources, ...this.extraSources]) {
       if (this.step < s.startStep || (s.endStep !== null && this.step >= s.endStep)) continue;
       const i = this.sourceCell(s);
-      if (i >= 0) T[i] += clamp(finiteOr(s.strength, 0), 0, 1) * (clamp(finiteOr(s.targetC, amb), TEMP_MIN, TEMP_MAX) - T[i]);
+      if (i < 0) continue;
+      const eff = clamp(finiteOr(s.efficiency, 1), 0, 5);
+      const target = clamp(amb + (clamp(finiteOr(s.targetC, amb), TEMP_MIN, TEMP_MAX) - amb) * eff, TEMP_MIN, TEMP_MAX);
+      T[i] += clamp(finiteOr(s.strength, 0) * eff, 0, 1) * (target - T[i]);
     }
     // 4. safety
     for (let i = 0; i < N; i++) T[i] = Number.isFinite(T[i]) ? clamp(T[i], TEMP_MIN, TEMP_MAX) : amb;
@@ -294,7 +430,7 @@ const intIn = (v: unknown, lo: number, hi: number, name: string): number | strin
 
 export function validateSource(input: unknown): Res<HeatSource> {
   if (!isObj(input)) return bad("Heat source must be an object.");
-  const { id, zoneId, x, y, targetC, strength, startStep, endStep } = input;
+  const { id, zoneId, x, y, targetC, strength, startStep, endStep, name, machineId, efficiency } = input;
   if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return bad("Heat source id is invalid.");
   const src: HeatSource = { id, targetC: 0, strength: 0, startStep: 0, endStep: null };
   if (typeof zoneId === "string" && zoneId) src.zoneId = zoneId;
@@ -310,6 +446,9 @@ export function validateSource(input: unknown): Res<HeatSource> {
   const en = endStep === undefined || endStep === null ? null : intIn(endStep, 0, 1e9, "endStep");
   if (typeof en === "string") return bad(en);
   if (en !== null && en <= st) return bad("endStep must be after startStep.");
+  if (name !== undefined) { if (typeof name !== "string" || name.length > 40) return bad("name must be text of at most 40 characters."); src.name = name; }
+  if (machineId !== undefined) { if (typeof machineId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(machineId)) return bad("machineId is invalid."); src.machineId = machineId; }
+  if (efficiency !== undefined) { const e = numIn(efficiency, 0, 5, "efficiency"); if (typeof e === "string") return bad(e); src.efficiency = e; }
   return { ok: true, value: { ...src, targetC: t, strength: s, startStep: st, endStep: en } };
 }
 

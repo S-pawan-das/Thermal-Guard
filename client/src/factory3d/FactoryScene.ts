@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { FloorPlanConfig, PlanZone, StateMessage, ZoneStatus } from "../../../shared/types";
-import { PLAN_WIDTH, PLAN_HEIGHT, SIM_COLS, SIM_ROWS, planToSimCell } from "../../../shared/floorplan";
+import type { FloorPlanConfig, LinkKind, LinkStatus, PlanZone, StateMessage, ZoneStatus } from "../../../shared/types";
+import { PLAN_WIDTH, PLAN_HEIGHT, SIM_COLS, SIM_ROWS, planToSimCell, regionOutline, zoneMiddle } from "../../../shared/floorplan";
 import { heatRgb } from "../../../shared/heat";
 import { layoutEquipment, type EquipItem } from "../../../shared/equipment";
 
@@ -56,6 +56,9 @@ function labelTexture(lines: { text: string; colour: string; size: number }[]): 
 
 interface MachineRef { mesh: THREE.Mesh; mat: THREE.MeshLambertMaterial; cell: number }
 interface ZoneRef { zone: PlanZone; sprite: THREE.Sprite; beacon: THREE.Mesh; text: string; fireAt: THREE.Vector3 }
+interface LinkRef { mesh: THREE.Mesh; mat: THREE.MeshLambertMaterial; kind: LinkKind; danger: string }
+const LINK_HEX: Record<LinkKind, number> = { pipe: 0x1d6fb8, duct: 0x7a5cc7, conveyor: 0x5b6470, door: 0xe8590c };
+const LINK_RADIUS: Record<LinkKind, number> = { pipe: 3.4, duct: 5.2, conveyor: 4.2, door: 4.6 };
 
 export class FactoryScene {
   private renderer: THREE.WebGLRenderer;
@@ -72,6 +75,7 @@ export class FactoryScene {
   private machines: MachineRef[] = [];
   private zones = new Map<string, ZoneRef>();
   private fires = new Map<string, THREE.Group>();
+  private linkRefs = new Map<string, LinkRef>();
   private raycaster = new THREE.Raycaster();
   private values: number[] = [];
   private owners: Int16Array | null = null;
@@ -184,19 +188,24 @@ export class FactoryScene {
     box(T, OUTER_H, PLAN_HEIGHT, outer, new THREE.Vector3(PLAN_WIDTH / 2, OUTER_H / 2, 0));
 
     for (const z of plan.zones) {
-      // zone walls (4 slabs), with a 44-unit doorway gap in the middle of the bottom wall so zones read as rooms
-      const c = toScene(z.x + z.w / 2, z.y + z.h / 2);
-      const t = 4;
-      const door = Math.min(44, z.w * 0.4);
-      const sideW = (z.w - door) / 2;
-      box(z.w, WALL_H, t, wallMat, new THREE.Vector3(c.x, WALL_H / 2, c.z - z.h / 2));
-      box(t, WALL_H, z.h, wallMat, new THREE.Vector3(c.x - z.w / 2, WALL_H / 2, c.z));
-      box(t, WALL_H, z.h, wallMat, new THREE.Vector3(c.x + z.w / 2, WALL_H / 2, c.z));
-      box(sideW, WALL_H, t, wallMat, new THREE.Vector3(c.x - z.w / 2 + sideW / 2, WALL_H / 2, c.z + z.h / 2));
-      box(sideW, WALL_H, t, wallMat, new THREE.Vector3(c.x + z.w / 2 - sideW / 2, WALL_H / 2, c.z + z.h / 2));
-
-      // equipment
-      layoutEquipment(z).forEach((it) => this.addEquipment(it));
+      const mid = zoneMiddle(z);
+      const c = toScene(mid.x, mid.y);
+      if (z.cells) {
+        // painted region of an open hall: no walls, just a low translucent curtain along the outline of its shape
+        this.addCurtain(z.cells);
+      } else {
+        // zone walls (4 slabs), with a 44-unit doorway gap in the middle of the bottom wall so zones read as rooms
+        const t = 4;
+        const door = Math.min(44, z.w * 0.4);
+        const sideW = (z.w - door) / 2;
+        box(z.w, WALL_H, t, wallMat, new THREE.Vector3(c.x, WALL_H / 2, c.z - z.h / 2));
+        box(t, WALL_H, z.h, wallMat, new THREE.Vector3(c.x - z.w / 2, WALL_H / 2, c.z));
+        box(t, WALL_H, z.h, wallMat, new THREE.Vector3(c.x + z.w / 2, WALL_H / 2, c.z));
+        box(sideW, WALL_H, t, wallMat, new THREE.Vector3(c.x - z.w / 2 + sideW / 2, WALL_H / 2, c.z + z.h / 2));
+        box(sideW, WALL_H, t, wallMat, new THREE.Vector3(c.x + z.w / 2 - sideW / 2, WALL_H / 2, c.z + z.h / 2));
+        // equipment
+        layoutEquipment(z).forEach((it) => this.addEquipment(it));
+      }
 
       // label + status beacon
       const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture([{ text: z.name, colour: "#1d2025", size: 44 }]), depthTest: false, transparent: true }));
@@ -205,7 +214,8 @@ export class FactoryScene {
       sprite.renderOrder = 10;
       this.root.add(sprite);
       const beacon = new THREE.Mesh(new THREE.SphereGeometry(7, 16, 12), new THREE.MeshBasicMaterial({ color: STATUS_HEX.normal }));
-      beacon.position.set(c.x - z.w / 2 + 10, WALL_H + 8, c.z - z.h / 2 + 10);
+      if (z.cells) beacon.position.set(c.x, WALL_H + 10, c.z + 24);
+      else beacon.position.set(c.x - z.w / 2 + 10, WALL_H + 8, c.z - z.h / 2 + 10);
       this.root.add(beacon);
       this.zones.set(z.id, { zone: z, sprite, beacon, text: "", fireAt: new THREE.Vector3(c.x, 0, c.z) });
     }
@@ -216,6 +226,42 @@ export class FactoryScene {
       m.position.set(p.x, 14, p.z);
       this.root.add(m);
     }
+
+    // pipes, ducts, conveyors and doors between zones: arched tubes, recoloured by danger in update()
+    const byId = new Map(plan.zones.map((q) => [q.id, q]));
+    for (const l of plan.links ?? []) {
+      const za = byId.get(l.a), zb = byId.get(l.b);
+      if (!za || !zb) continue;
+      const ma = zoneMiddle(za), mb = zoneMiddle(zb);
+      const a = toScene(ma.x, ma.y), b = toScene(mb.x, mb.y);
+      const lift = l.kind === "conveyor" ? 18 : l.kind === "door" ? 12 : 44;
+      const curve = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(a.x, 10, a.z), new THREE.Vector3(a.x + (b.x - a.x) * 0.25, lift, a.z + (b.z - a.z) * 0.25),
+        new THREE.Vector3((a.x + b.x) / 2, lift + 6, (a.z + b.z) / 2),
+        new THREE.Vector3(a.x + (b.x - a.x) * 0.75, lift, a.z + (b.z - a.z) * 0.75), new THREE.Vector3(b.x, 10, b.z),
+      ]);
+      const mat = new THREE.MeshLambertMaterial({ color: LINK_HEX[l.kind], transparent: true, opacity: 0.95 });
+      const mesh = new THREE.Mesh(new THREE.TubeGeometry(curve, 36, LINK_RADIUS[l.kind], 8, false), mat);
+      this.root.add(mesh);
+      this.linkRefs.set(l.id, { mesh, mat, kind: l.kind, danger: "" });
+    }
+  }
+
+  /** Translucent curtain along the outline of a painted region, plus a darker line on the floor. */
+  private addCurtain(cells: number[]) {
+    const pos: number[] = [], line: number[] = [];
+    const H = 16;
+    for (const [x0, y0, x1, y1] of regionOutline(cells)) {
+      const a = toScene(x0, y0), b = toScene(x1, y1);
+      pos.push(a.x, 0, a.z, b.x, 0, b.z, b.x, H, b.z, a.x, 0, a.z, b.x, H, b.z, a.x, H, a.z);
+      line.push(a.x, 1.5, a.z, b.x, 1.5, b.z);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    this.root.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x6b7783, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false })));
+    const lg = new THREE.BufferGeometry();
+    lg.setAttribute("position", new THREE.Float32BufferAttribute(line, 3));
+    this.root.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0x1d2025, transparent: true, opacity: 0.85 })));
   }
 
   private addEquipment(it: EquipItem) {
@@ -279,13 +325,15 @@ export class FactoryScene {
     this.root.clear();
     this.machines = [];
     this.zones.clear();
+    this.linkRefs.clear();
     this.fires.forEach((f) => this.fireGroup.remove(f));
     this.fires.clear();
   }
 
   /** Push the latest live state into the scene: heat floor, glowing machines, labels, beacons, fires. */
-  update(state: StateMessage | null, colours: ColourField | null) {
-    if (state?.grid) this.values = state.grid.values;
+  update(state: StateMessage | null, colours: ColourField | null, gridValues?: number[]) {
+    if (gridValues) this.values = gridValues;
+    else if (state?.grid) this.values = state.grid.values;
     if (colours) {
       const g = this.small.getContext("2d")!;
       const img = g.createImageData(SIM_COLS, SIM_ROWS);
@@ -324,6 +372,17 @@ export class FactoryScene {
         mat.map = labelTexture(lines);
         mat.needsUpdate = true;
       }
+    }
+    // links: colour by danger; closed ones fade out
+    const st = new Map<string, LinkStatus>((state?.links ?? []).map((x) => [x.id, x]));
+    for (const [id, ref] of this.linkRefs) {
+      const ls = st.get(id);
+      const key = ls ? `${ls.closed ? "closed" : ls.danger}` : "";
+      if (key === ref.danger) continue;
+      ref.danger = key;
+      ref.mat.color.setHex(ls?.closed ? 0xaab4bd : ls?.danger === "spread" ? 0xd6264a : ls?.danger === "watch" ? 0xf2a900 : LINK_HEX[ref.kind]);
+      ref.mat.opacity = ls?.closed ? 0.35 : 0.95;
+      ref.mat.emissive.setHex(ls?.danger === "spread" && !ls.closed ? 0x7a1020 : 0x000000);
     }
     // fires
     const want = new Set((state?.sim?.fires ?? []).filter((f) => f.zoneId && this.zones.has(f.zoneId)).map((f) => f.zoneId as string));

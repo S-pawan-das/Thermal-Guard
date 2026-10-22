@@ -6,24 +6,27 @@ import FloorPlanEditor from "./components/FloorPlanEditor";
 import AlertBanner from "./components/AlertBanner";
 import AlertFeed from "./components/AlertFeed";
 import SimControls from "./components/SimControls";
+import Insights from "./components/Insights";
 import HeatmapView from "./components/HeatmapView";
 import Onboarding from "./components/Onboarding";
 import Icon, { type IconName } from "./components/icons";
 
 type Connection = "connecting" | "connected" | "disconnected";
-type View = "dashboard" | "heat" | "plan" | "sim";
+type View = "dashboard" | "heat" | "insights" | "plan" | "sim";
 type Filter = "all" | "attention" | ZoneType;
 
 const CONN_LABEL: Record<Connection, string> = { connecting: "Connecting", connected: "Live", disconnected: "Offline" };
 const TITLES: Record<View, [string, string]> = {
   dashboard: ["Your Factory", "Overview"],
   heat: ["Live Factory", "Heatmap"],
+  insights: ["Machine", "Insights"],
   plan: ["Plan Your", "Floor"],
   sim: ["Incident", "Simulator"],
 };
 const NAV: { view: View; label: string; icon: IconName }[] = [
   { view: "dashboard", label: "Dashboard", icon: "home" },
   { view: "heat", label: "Heatmap", icon: "cube" },
+  { view: "insights", label: "Insights", icon: "pulse" },
   { view: "plan", label: "Floor plan", icon: "layout" },
   { view: "sim", label: "Simulator", icon: "sliders" },
 ];
@@ -145,6 +148,8 @@ export default function App() {
 
       {view === "heat" ? (
         <HeatmapView state={state} />
+      ) : view === "insights" ? (
+        <Insights state={state} />
       ) : view === "plan" ? (
         <FloorPlanEditor />
       ) : view === "sim" ? (

@@ -56,11 +56,44 @@ export interface StateMessage {
   zones: Zone[];
   sim?: SimStatus;
   grid?: GridSnapshot; // drives the Heatmap tab
+  links?: LinkStatus[]; // live state of every pipe / duct / conveyor / door
+  machines?: MachineStatus[]; // learned-pattern monitor, one entry per machine that has run a cycle
+}
+
+// A connection and whether heat is currently threatening the zone at its far end.
+export interface LinkStatus {
+  id: string;
+  a: string;
+  b: string;
+  kind: LinkKind;
+  closed: boolean; // isolated (valve shut / door closed): no heat travels
+  danger: "none" | "watch" | "spread"; // spread = one end is critical/on fire and heat is expected to travel
+}
+
+// Live view of one machine's temperature rise since it started, against its learned normal.
+export interface MachineStatus {
+  id: string; // machine id (stable across cycles)
+  name: string;
+  zoneId?: string;
+  running: boolean;
+  minute: number; // minutes since the current cycle started (1 sim step = 1 minute of factory time, see MINUTES_PER_STEP in floorplan.ts)
+  window: number; // length of the learned curve in minutes
+  riseC: number; // observed rise so far at the machine's probe, °C
+  expectedC: number | null; // learned normal rise at this minute (null while nothing is learned yet)
+  bandC: number | null; // +/- tolerance around expectedC
+  projectedC: number | null; // projected rise at the end of the window if the pattern continues
+  usualC: number | null; // learned normal rise at the end of the window
+  cycles: number; // cycles the profile was learned from
+  verdict: "learning" | "normal" | "underperform" | "overshoot";
+  curve: { m: number; mean: number; sd: number }[]; // learned normal curve
+  actual: { m: number; v: number }[]; // observed curve of the current / last cycle
 }
 
 // ---- Alerts (server-authoritative; broadcast on the "alerts" Socket.IO event) ----
 export type AlertSeverity = "warning" | "critical";
-export type AlertKind = "high" | "low"; // which limit the reading is approaching / has crossed
+// high / low: a limit is approached or crossed. spread: heat can travel here from a connected zone.
+// underperform / overshoot: a machine's temperature rise after start differs from its learned normal (repair vs. danger).
+export type AlertKind = "high" | "low" | "spread" | "underperform" | "overshoot";
 
 export interface AlertRecord {
   id: string; // stable, never reused, e.g. "A-000012"
@@ -78,6 +111,12 @@ export interface AlertRecord {
   resolvedAt: string | null;
   resolution: "recovered" | "escalated" | "scenario reset" | "zone removed" | "server restart" | null;
   occurrences: number; // 1, +1 each time the same alert is re-opened inside the cooldown
+  // Optional "what is the problem" detail (spread / machine-pattern alerts, and root causes of limit alerts).
+  title?: string; // short headline, e.g. "Machine heating slower than usual"
+  explain?: string[]; // bullet lines: what was observed, what is normal, likely causes
+  advice?: string; // the recommended action
+  subject?: string; // what the alert is about besides the zone: machine id, link id, ...
+  etaSteps?: number | null; // predicted steps until a limit is crossed, when known
 }
 
 export interface AlertsMessage {
@@ -91,10 +130,22 @@ export interface AlertsMessage {
 export interface PlanZone extends ZoneLimits {
   id: string;
   name: string;
-  x: number; // top-left corner
+  x: number; // top-left corner (for a painted region: the corner of its bounding box)
   y: number;
   w: number;
   h: number;
+  // FREE-FORM REGION: when present, the zone is exactly these simulation cells (index = row * SIM_COLS + col), any shape,
+  // with no walls around it (an open hall). x/y/w/h are then just its bounding box, recomputed by validatePlan.
+  cells?: number[];
+}
+
+// A physical connection that heat can travel along between two zones.
+export type LinkKind = "pipe" | "duct" | "conveyor" | "door";
+export interface PlanLink {
+  id: string;
+  a: string; // zone id
+  b: string; // zone id
+  kind: LinkKind;
 }
 
 export interface ExitMarker {
@@ -107,5 +158,6 @@ export interface FloorPlanConfig {
   version: 2;
   zones: PlanZone[];
   exits: ExitMarker[];
+  links?: PlanLink[]; // pipes, ducts, conveyors and doors between zones (absent in old files = none)
   background: string | null; // PNG/JPEG/WebP data URL, or null
 }

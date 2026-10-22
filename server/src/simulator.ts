@@ -1,11 +1,11 @@
-import type { StateMessage, Zone, ZoneForecast } from "../../shared/types";
+import type { LinkStatus, MachineStatus, StateMessage, Zone, ZoneForecast } from "../../shared/types";
 import { statusForCells, SIM_COLS, SIM_ROWS } from "../../shared/floorplan";
 import type { ThermalSim } from "./thermal";
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
 
 /** Builds the live message: each zone's saved limits plus statistics of the grid cells it covers. */
-export function getState(sim: ThermalSim, now: Date = new Date(), forecasts?: ReadonlyMap<string, ZoneForecast>): StateMessage {
+export function getState(sim: ThermalSim, now: Date = new Date(), forecasts?: ReadonlyMap<string, ZoneForecast>, extras?: { links?: LinkStatus[]; machines?: MachineStatus[] }): StateMessage {
   const timestamp = now.toISOString();
   const stats = new Map(sim.zoneStats().map((s) => [s.id, s]));
   const zones: Zone[] = sim.getZones().map((p) => {
@@ -18,5 +18,5 @@ export function getState(sim: ThermalSim, now: Date = new Date(), forecasts?: Re
     };
   });
   const grid = { cols: SIM_COLS, rows: SIM_ROWS, values: sim.getGrid().map(round1) };
-  return { simulated: true, timestamp, zones, sim: sim.status(), grid };
+  return { simulated: true, timestamp, zones, sim: sim.status(), grid, ...(extras?.links?.length ? { links: extras.links } : {}), ...(extras?.machines?.length ? { machines: extras.machines } : {}) };
 }

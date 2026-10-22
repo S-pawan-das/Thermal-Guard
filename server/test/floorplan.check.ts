@@ -69,7 +69,7 @@ async function main() {
     });
   }
   await ok("cold template has 2-8 C cold rooms", () => {
-    const a = TEMPLATES[1].build().zones.find((z) => z.name === "Cold Room A")!;
+    const a = TEMPLATES.find((t) => t.key === "cold")!.build().zones.find((z) => z.name === "Cold Room A")!;
     assert.deepEqual([a.type, a.minC, a.maxC], ["cold-storage", 2, 8]);
   });
   await ok("rejects duplicate ids", () => bad(plan([zone(), zone({ name: "B" })]), /Duplicate id/));

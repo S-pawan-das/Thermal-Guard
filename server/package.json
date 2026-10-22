@@ -6,7 +6,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server/src/index.js",
-    "test": "tsx test/floorplan.check.ts && tsx test/thermal.check.ts && tsx test/alerts.check.ts && tsx test/heat.check.ts && tsx test/equipment.check.ts && tsx test/forecast.check.ts",
+    "test": "tsx test/floorplan.check.ts && tsx test/thermal.check.ts && tsx test/alerts.check.ts && tsx test/heat.check.ts && tsx test/equipment.check.ts && tsx test/forecast.check.ts && tsx test/twin.check.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

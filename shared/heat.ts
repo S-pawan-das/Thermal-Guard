@@ -41,9 +41,10 @@ export function heatRgb(u: number): [number, number, number] {
 }
 
 /** For each simulation cell: index of the zone that owns it (cell centre inside the zone; later zones win), or -1. Same rule as the engine. */
-export function cellOwners(zones: Pick<PlanZone, "x" | "y" | "w" | "h">[]): Int16Array {
+export function cellOwners(zones: Pick<PlanZone, "x" | "y" | "w" | "h" | "cells">[]): Int16Array {
   const owner = new Int16Array(SIM_COLS * SIM_ROWS).fill(-1);
   zones.forEach((z, zi) => {
+    if (z.cells) { for (const i of z.cells) owner[i] = zi; return; }
     for (let r = 0; r < SIM_ROWS; r++)
       for (let c = 0; c < SIM_COLS; c++) {
         const cx = c * SIM_CELL_W + SIM_CELL_W / 2, cy = r * SIM_CELL_H + SIM_CELL_H / 2;

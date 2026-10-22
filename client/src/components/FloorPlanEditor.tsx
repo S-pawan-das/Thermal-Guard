@@ -1,25 +1,37 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, PointerEvent as RPointerEvent } from "react";
-import type { ExitMarker, FloorPlanConfig, PlanZone, ZoneType } from "../../../shared/types";
+import type { ExitMarker, FloorPlanConfig, LinkKind, PlanLink, PlanZone, ZoneType } from "../../../shared/types";
 import {
-  PLAN_WIDTH, PLAN_HEIGHT, GRID_SIZE, MIN_ZONE_SIZE, MAX_ZONES, MAX_EXITS, MAX_NAME_LENGTH,
+  PLAN_WIDTH, PLAN_HEIGHT, GRID_SIZE, MIN_ZONE_SIZE, MAX_ZONES, MAX_EXITS, MAX_NAME_LENGTH, MAX_LINKS,
+  SIM_COLS, SIM_ROWS, SIM_CELL_W, SIM_CELL_H, LINK_KINDS, LINK_LABEL,
   clamp, snap, clampRect, checkName, validatePlan, validateLimits, DEFAULT_LIMITS, ZONE_TYPES, ZONE_TYPE_LABEL,
+  planToSimCell, cellsBounds, regionOutline, zoneMiddle, linkBetween,
 } from "../../../shared/floorplan";
 import { TEMPLATES } from "../templates";
 
-type Tool = "select" | "zone" | "exit";
-type Sel = { kind: "zone" | "exit"; id: string } | null;
+type Tool = "select" | "zone" | "paint" | "link" | "exit";
+type Sel = { kind: "zone" | "exit" | "link"; id: string } | null;
 type Drag =
   | { mode: "draw"; x0: number; y0: number; x1: number; y1: number }
-  | { mode: "move"; kind: "zone" | "exit"; id: string; dx: number; dy: number }
+  | { mode: "move"; kind: "zone" | "exit"; id: string; dx: number; dy: number; orig?: number[]; grab?: { col: number; row: number } }
+  | { mode: "paint"; cells: number[]; erase: boolean; target?: string }
   | null;
 type SaveState = "idle" | "saving" | "saved" | "error";
 
-const TOOL_LABEL: Record<Tool, string> = { select: "Select / move", zone: "Draw zone", exit: "Add exit" };
+const TOOL_LABEL: Record<Tool, string> = { select: "Select / move", zone: "Draw room", paint: "Paint region", link: "Connect", exit: "Add exit" };
 const TOOL_HINT: Record<Tool, string> = {
-  select: "Click a zone or exit to select it. Drag to move it.",
-  zone: "Drag on the plan to draw a zone. Edges snap to the grid.",
+  select: "Click a zone, exit or connection to select it. Drag a zone or exit to move it.",
+  zone: "Drag on the plan to draw a walled room. Edges snap to the grid.",
+  paint: "Paint any shape on the grid, like an area of an open hall with no walls. Select a painted region first to add to it (or erase from it).",
+  link: "Click one zone, then another, to connect them with a pipe, duct, conveyor or door. Heat can travel along connections.",
   exit: "Click on the plan to place an exit marker.",
+};
+const BRUSHES = [1, 2, 3, 5];
+const LINK_STYLE: Record<LinkKind, { colour: string; width: number; dash: number[] }> = {
+  pipe: { colour: "#1d6fb8", width: 5, dash: [10, 6] },
+  duct: { colour: "#7a5cc7", width: 4, dash: [3, 6] },
+  conveyor: { colour: "#5b6470", width: 6, dash: [16, 6] },
+  door: { colour: "#e8590c", width: 4, dash: [] },
 };
 const SAVE_LABEL: Record<SaveState, string> = { idle: "No changes", saving: "Saving…", saved: "Saved", error: "Not saved" };
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
@@ -31,6 +43,26 @@ function newId(prefix: string, taken: Set<string>) {
   while (taken.has(id));
   return id;
 }
+function nextRegionName(zones: PlanZone[]) {
+  const used = new Set(zones.map((z) => z.name.toLowerCase()));
+  for (let n = 1; ; n++) if (!used.has(`area ${n}`)) return `Area ${n}`;
+}
+/** Cells covered by a square brush of `size` cells centred on the cell under (x, y). */
+function brushCells(x: number, y: number, size: number): number[] {
+  const { col, row } = planToSimCell(x, y);
+  const out: number[] = [];
+  for (let dr = -Math.floor(size / 2); dr <= Math.floor((size - 1) / 2); dr++)
+    for (let dc = -Math.floor(size / 2); dc <= Math.floor((size - 1) / 2); dc++) {
+      const c = col + dc, r = row + dr;
+      if (c >= 0 && c < SIM_COLS && r >= 0 && r < SIM_ROWS) out.push(r * SIM_COLS + c);
+    }
+  return out;
+}
+const distToSegment = (px: number, py: number, ax: number, ay: number, bx: number, by: number) => {
+  const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+  const t = len2 ? clamp(((px - ax) * dx + (py - ay) * dy) / len2, 0, 1) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+};
 function nextZoneName(zones: PlanZone[]) {
   const used = new Set(zones.map((z) => z.name.toLowerCase()));
   for (let n = 1; ; n++) if (!used.has(`zone ${n}`)) return `Zone ${n}`;
@@ -131,6 +163,11 @@ export default function FloorPlanEditor() {
   const [sel, setSel] = useState<Sel>(null);
   const [drag, setDrag] = useState<Drag>(null);
   const [draft, setDraft] = useState("");
+  const [brush, setBrush] = useState(2);
+  const [erase, setErase] = useState(false);
+  const [linkKind, setLinkKind] = useState<LinkKind>("pipe");
+  const [linkFrom, setLinkFrom] = useState<string | null>(null);
+  const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
   const [width, setWidth] = useState(900);
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -141,6 +178,8 @@ export default function FloorPlanEditor() {
 
   const selZone = sel?.kind === "zone" ? plan?.zones.find((z) => z.id === sel.id) : undefined;
   const selExit = sel?.kind === "exit" ? plan?.exits.find((x) => x.id === sel.id) : undefined;
+  const selLink = sel?.kind === "link" ? plan?.links?.find((l) => l.id === sel.id) : undefined;
+  const links = plan?.links ?? [];
 
   const edit = (fn: (p: FloorPlanConfig) => FloorPlanConfig) => {
     setMsg(null);
@@ -255,16 +294,48 @@ export default function FloorPlanEditor() {
       ctx.fillStyle = on ? "rgba(15,157,104,.28)" : "rgba(15,157,104,.13)";
       ctx.strokeStyle = on ? "#1d2025" : "#0f9d68";
       ctx.lineWidth = on ? 3 : 2;
-      ctx.fillRect(z.x, z.y, z.w, z.h);
-      ctx.strokeRect(z.x, z.y, z.w, z.h);
+      if (z.cells) {
+        // painted region: every cell, then the outline of the shape
+        for (const i of z.cells) ctx.fillRect((i % SIM_COLS) * SIM_CELL_W, Math.floor(i / SIM_COLS) * SIM_CELL_H, SIM_CELL_W + 0.5, SIM_CELL_H + 0.5);
+        ctx.beginPath();
+        for (const [x0, y0, x1, y1] of regionOutline(z.cells)) { ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); }
+        ctx.stroke();
+      } else {
+        ctx.fillRect(z.x, z.y, z.w, z.h);
+        ctx.strokeRect(z.x, z.y, z.w, z.h);
+      }
       ctx.save();
       ctx.beginPath();
-      ctx.rect(z.x, z.y, z.w, z.h);
+      if (z.cells) ctx.rect(0, 0, PLAN_WIDTH, PLAN_HEIGHT); else ctx.rect(z.x, z.y, z.w, z.h);
       ctx.clip();
       ctx.fillStyle = "#1d2025";
       ctx.font = "600 15px 'Segoe UI', sans-serif";
-      ctx.fillText(z.name, z.x + 8, z.y + 22);
+      if (z.cells) { const m = zoneMiddle(z); ctx.textAlign = "center"; ctx.fillText(z.name, m.x, m.y + 5); ctx.textAlign = "start"; }
+      else ctx.fillText(z.name, z.x + 8, z.y + 22);
       ctx.restore();
+    }
+
+    // connections (pipes, ducts, conveyors, doors)
+    const zoneById = new Map((plan?.zones ?? []).map((z) => [z.id, z]));
+    for (const l of plan?.links ?? []) {
+      const za = zoneById.get(l.a), zb = zoneById.get(l.b);
+      if (!za || !zb) continue;
+      const a = zoneMiddle(za), b = zoneMiddle(zb), st = LINK_STYLE[l.kind], on = sel?.kind === "link" && sel.id === l.id;
+      ctx.save();
+      if (on) { ctx.setLineDash([]); ctx.strokeStyle = "#1d2025"; ctx.lineWidth = st.width + 5; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+      ctx.setLineDash(st.dash); ctx.strokeStyle = st.colour; ctx.lineWidth = st.width; ctx.lineCap = "butt";
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#ffffff"; ctx.strokeStyle = st.colour; ctx.lineWidth = 2;
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      ctx.beginPath(); ctx.arc(mx, my, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = st.colour; ctx.font = "800 12px 'Segoe UI', sans-serif"; ctx.textAlign = "center";
+      ctx.fillText(LINK_LABEL[l.kind][0], mx, my + 4);
+      ctx.restore();
+    }
+    if (tool === "link" && linkFrom && hover) {
+      const za = zoneById.get(linkFrom);
+      if (za) { const a = zoneMiddle(za); ctx.save(); ctx.setLineDash([6, 6]); ctx.strokeStyle = LINK_STYLE[linkKind].colour; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(hover.x, hover.y); ctx.stroke(); ctx.restore(); }
     }
 
     for (const ex of plan?.exits ?? []) {
@@ -285,6 +356,10 @@ export default function FloorPlanEditor() {
       ctx.fillText("EXIT", ex.x + 14, ex.y + 4);
     }
 
+    if (drag?.mode === "paint") {
+      ctx.fillStyle = drag.erase ? "rgba(214,38,74,.35)" : "rgba(232,89,12,.35)";
+      for (const i of drag.cells) ctx.fillRect((i % SIM_COLS) * SIM_CELL_W, Math.floor(i / SIM_COLS) * SIM_CELL_H, SIM_CELL_W + 0.5, SIM_CELL_H + 0.5);
+    }
     if (drag?.mode === "draw") {
       const r = clampRect(drag.x0, drag.y0, drag.x1, drag.y1);
       ctx.setLineDash([6, 4]);
@@ -293,7 +368,7 @@ export default function FloorPlanEditor() {
       ctx.strokeRect(r.x, r.y, r.w, r.h);
       ctx.setLineDash([]);
     }
-  }, [plan, img, drag, sel, width]);
+  }, [plan, img, drag, sel, width, tool, linkFrom, hover, linkKind]);
 
   // ---- keyboard: Delete removes selection, Escape deselects ----
   useEffect(() => {
@@ -307,6 +382,7 @@ export default function FloorPlanEditor() {
         setSel(null);
         setTool("select");
         setDrag(null);
+        setLinkFrom(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -322,8 +398,10 @@ export default function FloorPlanEditor() {
     if (!sel) return;
     edit((p) =>
       sel.kind === "zone"
-        ? { ...p, zones: p.zones.filter((z) => z.id !== sel.id) }
-        : { ...p, exits: p.exits.filter((x) => x.id !== sel.id) }
+        ? { ...p, zones: p.zones.filter((z) => z.id !== sel.id), links: (p.links ?? []).filter((l) => l.a !== sel.id && l.b !== sel.id) }
+        : sel.kind === "link"
+          ? { ...p, links: (p.links ?? []).filter((l) => l.id !== sel.id) }
+          : { ...p, exits: p.exits.filter((x) => x.id !== sel.id) }
     );
     setSel(null);
   }
@@ -343,10 +421,10 @@ export default function FloorPlanEditor() {
   function loadTemplate(key: string) {
     const t = TEMPLATES.find((x) => x.key === key);
     if (!t || !plan) return;
-    if ((plan.zones.length || plan.exits.length) && !window.confirm("Replace the current zones and exits with this template?")) return;
+    if ((plan.zones.length || plan.exits.length) && !window.confirm("Replace the current zones, connections and exits with this template?")) return;
     const b = t.build();
     setSel(null);
-    edit((p) => ({ ...p, zones: b.zones, exits: b.exits }));
+    edit((p) => ({ ...p, zones: b.zones, exits: b.exits, links: b.links ?? [] }));
   }
 
   function onFile(ev: ChangeEvent<HTMLInputElement>) {
@@ -376,14 +454,33 @@ export default function FloorPlanEditor() {
     };
   };
 
-  function hit(x: number, y: number): Sel {
+  function hit(x: number, y: number, withLinks = true): Sel {
     if (!plan) return null;
     for (const ex of plan.exits) if (Math.hypot(ex.x - x, ex.y - y) <= 14) return { kind: "exit", id: ex.id };
+    if (withLinks) {
+      const byId = new Map(plan.zones.map((z) => [z.id, z]));
+      for (const l of links) {
+        const za = byId.get(l.a), zb = byId.get(l.b);
+        if (!za || !zb) continue;
+        const a = zoneMiddle(za), b = zoneMiddle(zb);
+        if (distToSegment(x, y, a.x, a.y, b.x, b.y) <= 9) return { kind: "link", id: l.id };
+      }
+    }
+    const cell = (() => { const c = planToSimCell(x, y); return c.row * SIM_COLS + c.col; })();
     for (let i = plan.zones.length - 1; i >= 0; i--) {
       const z = plan.zones[i];
-      if (x >= z.x && x <= z.x + z.w && y >= z.y && y <= z.y + z.h) return { kind: "zone", id: z.id };
+      if (z.cells ? z.cells.includes(cell) : x >= z.x && x <= z.x + z.w && y >= z.y && y <= z.y + z.h) return { kind: "zone", id: z.id };
     }
     return null;
+  }
+  function addLink(from: string, to: string) {
+    if (!plan) return;
+    if (from === to) return setMsg("Pick a different second zone.");
+    if (linkBetween(links, from, to)) return setMsg("Those two zones are already connected. Select the connection to change it.");
+    if (links.length >= MAX_LINKS) return setMsg(`At most ${MAX_LINKS} connections are allowed.`);
+    const id = newId("link", new Set([...plan.zones.map((z) => z.id), ...plan.exits.map((x) => x.id), ...links.map((l) => l.id)]));
+    edit((q) => ({ ...q, links: [...(q.links ?? []), { id, a: from, b: to, kind: linkKind }] }));
+    setSel({ kind: "link", id });
   }
 
   function onDown(ev: RPointerEvent<HTMLCanvasElement>) {
@@ -400,24 +497,48 @@ export default function FloorPlanEditor() {
     } else if (tool === "zone") {
       setSel(null);
       setDrag({ mode: "draw", x0: snap(p.x), y0: snap(p.y), x1: snap(p.x), y1: snap(p.y) });
+    } else if (tool === "paint") {
+      const target = selZone?.cells ? selZone.id : undefined;
+      setDrag({ mode: "paint", cells: brushCells(p.x, p.y, brush), erase: erase && !!target, target });
+    } else if (tool === "link") {
+      const h = hit(p.x, p.y, false);
+      if (h?.kind !== "zone") return setMsg("Click a zone to start or finish a connection.");
+      setMsg(null);
+      if (!linkFrom) { setLinkFrom(h.id); setHover(p); } else { addLink(linkFrom, h.id); setLinkFrom(null); }
     } else {
       const h = hit(p.x, p.y);
       setSel(h);
+      if (h?.kind === "link") return;
       const o: PlanZone | ExitMarker | undefined =
         h?.kind === "zone" ? plan.zones.find((z) => z.id === h.id) : h ? plan.exits.find((x) => x.id === h.id) : undefined;
-      if (h && o) setDrag({ mode: "move", kind: h.kind, id: h.id, dx: p.x - o.x, dy: p.y - o.y });
+      if (h && o) {
+        const zc = h.kind === "zone" ? (o as PlanZone).cells : undefined;
+        setDrag({ mode: "move", kind: h.kind, id: h.id, dx: p.x - o.x, dy: p.y - o.y, ...(zc ? { orig: zc, grab: planToSimCell(p.x, p.y) } : {}) });
+      }
     }
   }
 
   function onMove(ev: RPointerEvent<HTMLCanvasElement>) {
-    if (!drag) return;
     const p = toPlan(ev);
+    if (tool === "link" && linkFrom) setHover(p);
+    if (!drag) return;
     if (drag.mode === "draw") {
       setDrag({ ...drag, x1: snap(p.x), y1: snap(p.y) });
+    } else if (drag.mode === "paint") {
+      const add = brushCells(p.x, p.y, brush).filter((i) => !drag.cells.includes(i));
+      if (add.length) setDrag({ ...drag, cells: [...drag.cells, ...add] });
     } else {
       moved.current = true;
       setPlan((q) => {
         if (!q) return q;
+        if (drag.kind === "zone" && drag.orig && drag.grab) {
+          const now = planToSimCell(p.x, p.y);
+          const b = cellsBounds(drag.orig);
+          const c0 = Math.round(b.x / SIM_CELL_W), c1 = c0 + Math.round(b.w / SIM_CELL_W) - 1, r0 = Math.round(b.y / SIM_CELL_H), r1 = r0 + Math.round(b.h / SIM_CELL_H) - 1;
+          const dc = clamp(now.col - drag.grab.col, -c0, SIM_COLS - 1 - c1), dr = clamp(now.row - drag.grab.row, -r0, SIM_ROWS - 1 - r1);
+          const cells = drag.orig.map((i) => (Math.floor(i / SIM_COLS) + dr) * SIM_COLS + (i % SIM_COLS) + dc);
+          return { ...q, zones: q.zones.map((z) => (z.id === drag.id ? { ...z, cells, ...cellsBounds(cells) } : z)) };
+        }
         if (drag.kind === "zone")
           return {
             ...q,
@@ -450,6 +571,24 @@ export default function FloorPlanEditor() {
         edit((q) => ({ ...q, zones: [...q.zones, { id, name: nextZoneName(q.zones), ...r, ...DEFAULT_LIMITS }] }));
         setSel({ kind: "zone", id });
       }
+    } else if (drag.mode === "paint") {
+      const taken = new Set([...plan.zones.map((z) => z.id), ...plan.exits.map((x) => x.id), ...links.map((l) => l.id)]);
+      if (drag.target) {
+        const tz = plan.zones.find((z) => z.id === drag.target);
+        if (tz?.cells) {
+          const next = drag.erase ? tz.cells.filter((i) => !drag.cells.includes(i)) : [...new Set([...tz.cells, ...drag.cells])].sort((a, b) => a - b);
+          if (!next.length) { setSel({ kind: "zone", id: tz.id }); setMsg("A region needs at least one cell. Use Delete to remove it."); }
+          else edit((q) => ({ ...q, zones: q.zones.map((z) => (z.id === tz.id ? { ...z, cells: next, ...cellsBounds(next) } : z)) }));
+        }
+      } else if (drag.cells.length) {
+        if (plan.zones.length >= MAX_ZONES) setMsg(`At most ${MAX_ZONES} zones are allowed.`);
+        else {
+          const id = newId("region", taken);
+          const cells = [...drag.cells].sort((a, b) => a - b);
+          edit((q) => ({ ...q, zones: [...q.zones, { id, name: nextRegionName(q.zones), cells, ...cellsBounds(cells), ...DEFAULT_LIMITS }] }));
+          setSel({ kind: "zone", id });
+        }
+      }
     } else if (moved.current) {
       setMsg(null);
       setRev((n) => n + 1); // the move was applied live; now save it
@@ -462,10 +601,27 @@ export default function FloorPlanEditor() {
       <div className="stage">
         <div className="toolbar">
           {(Object.keys(TOOL_LABEL) as Tool[]).map((t) => (
-            <button key={t} className={`btn ${tool === t ? "on" : ""}`} disabled={!plan} onClick={() => setTool(t)}>
+            <button key={t} className={`btn ${tool === t ? "on" : ""}`} disabled={!plan} onClick={() => { setTool(t); setLinkFrom(null); setErase(false); }}>
               {TOOL_LABEL[t]}
             </button>
           ))}
+          {tool === "paint" && (
+            <>
+              <label className="inline">Brush
+                <select value={brush} onChange={(e) => setBrush(Number(e.target.value))}>
+                  {BRUSHES.map((b) => <option key={b} value={b}>{b} × {b} cells</option>)}
+                </select>
+              </label>
+              <button className={`btn ${erase ? "on" : ""}`} disabled={!selZone?.cells} title={selZone?.cells ? "Erase cells from the selected region" : "Select a painted region to erase from it"} onClick={() => setErase((v) => !v)}>Erase</button>
+            </>
+          )}
+          {tool === "link" && (
+            <label className="inline">Type
+              <select value={linkKind} onChange={(e) => setLinkKind(e.target.value as LinkKind)}>
+                {LINK_KINDS.map((k) => <option key={k} value={k}>{LINK_LABEL[k]}</option>)}
+              </select>
+            </label>
+          )}
           <span className="sep" />
           {TEMPLATES.map((t) => (
             <button key={t.key} className="btn" disabled={!plan} onClick={() => loadTemplate(t.key)}>
@@ -500,9 +656,10 @@ export default function FloorPlanEditor() {
             onPointerMove={onMove}
             onPointerUp={onUp}
             onPointerCancel={() => setDrag(null)}
+            onPointerLeave={() => setHover(null)}
           />
         </div>
-        <p className="hint">{TOOL_HINT[tool]} Grid cell = {GRID_SIZE} units. Plan size {PLAN_WIDTH} × {PLAN_HEIGHT}.</p>
+        <p className="hint">{tool === "link" && linkFrom ? "Now click the second zone." : TOOL_HINT[tool]} Grid cell = {GRID_SIZE} units. Plan size {PLAN_WIDTH} × {PLAN_HEIGHT}.</p>
       </div>
 
       <aside className="side">
@@ -530,7 +687,11 @@ export default function FloorPlanEditor() {
                 onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
               />
             </label>
-            <p className="hint">x {selZone.x}, y {selZone.y}, {selZone.w} × {selZone.h} units</p>
+            {selZone.cells ? (
+              <p className="hint">Painted region: {selZone.cells.length} cells, no walls. Use “Paint region” with this selected to add cells, or Erase to remove them.</p>
+            ) : (
+              <p className="hint">x {selZone.x}, y {selZone.y}, {selZone.w} × {selZone.h} units</p>
+            )}
             <LimitsForm
               key={selZone.id}
               zone={selZone}
@@ -551,6 +712,19 @@ export default function FloorPlanEditor() {
             <button className="btn danger" onClick={deleteSel}>Delete zone</button>
           </div>
         )}
+        {selLink && (
+          <div className="details">
+            <p><b>{LINK_LABEL[selLink.kind]}</b> between {plan?.zones.find((z) => z.id === selLink.a)?.name} and {plan?.zones.find((z) => z.id === selLink.b)?.name}</p>
+            <label>
+              Type
+              <select value={selLink.kind} onChange={(e) => edit((q) => ({ ...q, links: (q.links ?? []).map((l) => (l.id === selLink.id ? { ...l, kind: e.target.value as LinkKind } : l)) }))}>
+                {LINK_KINDS.map((k) => <option key={k} value={k}>{LINK_LABEL[k]}</option>)}
+              </select>
+            </label>
+            <p className="hint">Heat and fire risk travel along open connections. In the Simulator and What-if panels you can isolate one.</p>
+            <button className="btn danger" onClick={deleteSel}>Delete connection</button>
+          </div>
+        )}
         {selExit && (
           <div className="details">
             <p>Exit marker</p>
@@ -558,6 +732,17 @@ export default function FloorPlanEditor() {
             <button className="btn danger" onClick={deleteSel}>Delete exit</button>
           </div>
         )}
+        <h2 style={{ marginTop: 18 }}>Connections ({links.length})</h2>
+        {links.length === 0 && <p className="hint">None. Use “Connect” to link two zones with a pipe, duct, conveyor or door.</p>}
+        <ul className="list">
+          {links.map((l) => (
+            <li key={l.id}>
+              <button className={sel?.id === l.id ? "on" : ""} onClick={() => setSel({ kind: "link", id: l.id })}>
+                {LINK_LABEL[l.kind]}: {plan?.zones.find((z) => z.id === l.a)?.name} ↔ {plan?.zones.find((z) => z.id === l.b)?.name}
+              </button>
+            </li>
+          ))}
+        </ul>
         <p className="hint">Exits: {plan?.exits.length ?? 0}</p>
       </aside>
     </section>
